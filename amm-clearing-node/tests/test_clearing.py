@@ -1,0 +1,222 @@
+"""End-to-end clearing cycle against an in-memory fake off-chain DB
+(guide §9 step 5: mock DB responses, run full cycle, assert trades)."""
+
+import pytest
+
+from src.clearing import run_clearing
+from src.config import Config
+from src.contract import MockContractClient
+
+MARKET = "0x" + "aa" * 32
+COMMUNITY = "communityid_1"
+SLOT = 900
+
+
+class FakeOffchainDB:
+    """Implements the OffchainDBClient interface used by run_clearing."""
+
+    def __init__(self, orders=None):
+        self.orders = {o["order_id"]: o for o in (orders or [])}
+        self.trades = []
+        self.order_patches = []
+
+    async def close(self):
+        pass
+
+    async def get_orders(self, market_id, start_time=None, end_time=None):
+        return [o for o in self.orders.values()
+                if o["market_id"] == market_id
+                and (start_time is None or o["time_slot"] >= start_time)
+                and (end_time is None or o["time_slot"] <= end_time)]
+
+    async def get_trades(self, market_id):
+        return [t for t in self.trades if t["market_id"] == market_id]
+
+    async def post_trades(self, trades):
+        self.trades.extend(trades)
+        return trades
+
+    async def update_order(self, order_id, *, status=None, energy=None):
+        self.order_patches.append((order_id, status, energy))
+        order = self.orders[order_id]
+        if status is not None:
+            order["status"] = status
+        return order
+
+
+def order(idx, order_type, name, energy, *, status="Open", time_slot=SLOT):
+    rate = 28.5 if order_type == "Bid" else 8.0
+    return {"order_id": f"0x{idx:064x}", "order_type": order_type,
+            "status": status, "created_by": name,
+            "area_uuid": f"area_{name.lower().replace(' ', '_')}",
+            "market_id": MARKET, "time_slot": time_slot,
+            "creation_time": 100 + idx, "energy": energy,
+            "energy_rate": rate, "requirements": None}
+
+
+def trigger(**overrides):
+    payload = {"market_id": MARKET, "community_uuid": COMMUNITY,
+               "time_slot": SLOT}
+    payload.update(overrides)
+    return payload
+
+
+@pytest.fixture()
+def cfg():
+    return Config()
+
+
+# Guide example numbers: supply 12.5 kWh vs demand 10 kWh -> ratio 1.25,
+# price ~15.1472 ct/kWh, demand-limited round.
+def demand_limited_orders():
+    return [
+        order(1, "Offer", "PV A", 5.0),
+        order(2, "Offer", "PV B", 3.5),
+        order(3, "Offer", "Battery", 4.0),
+        order(4, "Bid", "Household 1", 4.5),
+        order(5, "Bid", "Household 2", 3.0),
+        order(6, "Bid", "Bakery", 2.5),
+    ]
+
+
+@pytest.mark.anyio
+async def test_demand_limited_clearing(cfg):
+    db = FakeOffchainDB(demand_limited_orders())
+    chain = MockContractClient()
+
+    result = await run_clearing(trigger(), cfg, db, chain)
+
+    assert result["status"] == "cleared"
+    assert result["clearing_price_ct_per_kwh"] == pytest.approx(15.1472, abs=1e-3)
+    assert result["ratio"] == pytest.approx(1.25)
+    assert result["traded_quantity_kwh"] == pytest.approx(10.0)
+    assert result["round_type"] == "DEMAND_LIMITED"
+    assert result["num_trades"] == 6  # one per participant
+
+    # consumers fully filled, producers pro-rata at 10/12.5 = 80%
+    for producer in result["allocations"]["producers"]:
+        assert producer["fill_rate"] == pytest.approx(0.8)
+    for consumer in result["allocations"]["consumers"]:
+        assert consumer["fill_rate"] == pytest.approx(1.0)
+
+    pv_a = next(p for p in result["allocations"]["producers"]
+                if p["name"] == "PV A")
+    assert pv_a["allocated_kwh"] == pytest.approx(4.0)
+    assert pv_a["value_ct"] == pytest.approx(4.0 * 15.1472, abs=1e-2)
+
+    # allocations conserve energy: sum(producer) == sum(consumer) == traded
+    total_sold = sum(p["allocated_kwh"]
+                     for p in result["allocations"]["producers"])
+    total_bought = sum(c["allocated_kwh"]
+                       for c in result["allocations"]["consumers"])
+    assert total_sold == pytest.approx(10.0, abs=1e-6)
+    assert total_bought == pytest.approx(10.0, abs=1e-6)
+
+    # trades persisted; producers carry residual_offer (partial fill)
+    assert len(db.trades) == 6
+    seller_trades = [t for t in db.trades if t["buyer"].startswith("AMM_POOL")]
+    assert all(t["residual_offer"] is not None for t in seller_trades)
+    buyer_trades = [t for t in db.trades if t["seller"].startswith("AMM_POOL")]
+    assert all(t["residual_bid"] is None for t in buyer_trades)
+
+    # every matched order marked Executed
+    assert all(o["status"] == "Executed" for o in db.orders.values())
+
+    # on-chain anchor was recorded before trades were written
+    assert chain.records[MARKET]["clearing_price"] == 151472
+    assert result["tx_hash"] == chain.records[MARKET]["tx_hash"]
+    assert all(t["parameters"]["amm_tx_hash"] == result["tx_hash"]
+               for t in db.trades)
+
+
+@pytest.mark.anyio
+async def test_supply_limited_clearing(cfg):
+    db = FakeOffchainDB([
+        order(1, "Offer", "PV A", 4.0),
+        order(2, "Bid", "Household 1", 5.0),
+        order(3, "Bid", "Household 2", 3.0),
+    ])
+    result = await run_clearing(trigger(), cfg, db, MockContractClient())
+
+    assert result["round_type"] == "SUPPLY_LIMITED"
+    assert result["ratio"] == pytest.approx(0.5)
+    assert result["traded_quantity_kwh"] == pytest.approx(4.0)
+    # scarce supply -> price above band center
+    assert result["clearing_price_ct_per_kwh"] > (28.5 + 8.0) / 2
+    for consumer in result["allocations"]["consumers"]:
+        assert consumer["fill_rate"] == pytest.approx(0.5)
+
+
+@pytest.mark.anyio
+async def test_no_trade_when_one_side_is_empty(cfg):
+    db = FakeOffchainDB([
+        order(1, "Bid", "Household 1", 5.0),
+        order(2, "Bid", "Household 2", 3.0),
+    ])
+    chain = MockContractClient()
+    result = await run_clearing(trigger(), cfg, db, chain)
+
+    assert result["status"] == "no_trade"
+    assert result["num_orders_expired"] == 2
+    assert db.trades == []
+    assert chain.records == {}  # nothing anchored on-chain
+    assert all(o["status"] == "Expired" for o in db.orders.values())
+
+
+@pytest.mark.anyio
+async def test_non_open_orders_are_excluded(cfg):
+    db = FakeOffchainDB([
+        order(1, "Offer", "PV A", 5.0),
+        order(2, "Offer", "PV ghost", 99.0, status="Expired"),
+        order(3, "Bid", "Household 1", 5.0),
+        order(4, "Bid", "Ghost bid", 99.0, status="Executed"),
+    ])
+    result = await run_clearing(trigger(), cfg, db, MockContractClient())
+    assert result["total_supply_kwh"] == pytest.approx(5.0)
+    assert result["total_demand_kwh"] == pytest.approx(5.0)
+    assert result["num_trades"] == 2
+
+
+@pytest.mark.anyio
+async def test_orders_outside_delivery_window_are_excluded(cfg):
+    db = FakeOffchainDB([
+        order(1, "Offer", "PV A", 5.0),
+        order(2, "Bid", "Household 1", 5.0),
+        order(3, "Bid", "Next slot", 99.0, time_slot=SLOT + 901),
+    ])
+    result = await run_clearing(trigger(), cfg, db, MockContractClient())
+    assert result["total_demand_kwh"] == pytest.approx(5.0)
+
+
+@pytest.mark.anyio
+async def test_clearing_is_idempotent(cfg):
+    db = FakeOffchainDB(demand_limited_orders())
+    chain = MockContractClient()
+
+    first = await run_clearing(trigger(), cfg, db, chain)
+    second = await run_clearing(trigger(), cfg, db, chain)
+
+    assert second["status"] == "already_cleared"
+    assert len(db.trades) == 6  # not duplicated
+    assert second["clearing_price_ct_per_kwh"] == pytest.approx(
+        first["clearing_price_ct_per_kwh"], abs=1e-4)
+    assert second["tx_hash"] == first["tx_hash"]
+    # allocation summary reconstructed from stored trades
+    producers = {p["name"]: p for p in second["allocations"]["producers"]}
+    assert producers["PV A"]["allocated_kwh"] == pytest.approx(4.0)
+    assert producers["PV A"]["requested_kwh"] == pytest.approx(5.0)
+
+
+@pytest.mark.anyio
+async def test_trigger_sigmoid_param_overrides(cfg):
+    db = FakeOffchainDB([
+        order(1, "Offer", "PV A", 5.0),
+        order(2, "Bid", "Household 1", 5.0),
+    ])
+    result = await run_clearing(
+        trigger(sigmoid_params={"k_upper": 40.0, "k_lower": 10.0,
+                                "theta": 1.0, "steepness": 2.5}),
+        cfg, db, MockContractClient())
+    # ratio 1.0 == theta -> band center of the OVERRIDDEN band
+    assert result["clearing_price_ct_per_kwh"] == pytest.approx(25.0)
+    assert result["sigmoid_params"]["k_upper"] == 40.0

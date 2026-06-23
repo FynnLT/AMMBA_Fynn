@@ -1,0 +1,25 @@
+# AMM Execution Node default configuration.
+# Environment variables always override these values:
+#   OFFCHAIN_DB_URL, TIME_SLOT_SEC, EXECUTION_OFFSET_MIN,
+#   POLLING_INTERVAL_SEC, POLLING_ENABLED, PENALTY_GAMMA,
+#   PENALTY_TOLERANCE_KWH, HOST, PORT
+
+application:
+  host: "0.0.0.0"
+  port: 8082
+
+offchain_db:
+  base_url: "http://localhost:8080"
+
+execution:
+  time_slot_sec: 900            # 15-minute slots (GSY DEX default)
+  execution_offset_min: -120    # run 2h after delivery start (GSY DEX default)
+  polling_interval_sec: 300
+  # PoC default: the demo UI triggers POST /trigger-execution explicitly
+  # (delivery time is simulated). Enable for production-style operation.
+  polling_enabled: false
+  poll_communities: []          # community uuids scanned by the poller
+
+penalty:
+  gamma: 1.1                    # K_sho = gamma * K_upper  (gamma > 1)
+  eta_tolerance_kwh: 0.0        # shortfall tolerance threshold

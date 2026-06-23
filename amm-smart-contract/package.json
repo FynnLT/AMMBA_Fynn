@@ -1,0 +1,21 @@
+{
+  "name": "amm-smart-contract",
+  "version": "0.1.0",
+  "description": "AMMBA on-chain clearing anchor for the Energy Web Chain (AMMBA PoC)",
+  "private": true,
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "node": "hardhat node",
+    "deploy:local": "hardhat run scripts/deploy.js --network localhost",
+    "deploy:volta": "hardhat run scripts/deploy.js --network volta"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-chai-matchers": "2.0.3",
+    "@nomicfoundation/hardhat-ethers": "3.0.5",
+    "@nomicfoundation/hardhat-network-helpers": "1.0.10",
+    "chai": "4.4.1",
+    "ethers": "6.10.0",
+    "hardhat": "2.19.5"
+  }
+}

@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AMMBA Market Simulator</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="site">
+  <div class="container">
+    <h1>⚡ AMMBA Market Simulator
+      <small>Automated Market Maker for Batch Auctions — P2P energy market clearing (Master's thesis PoC)</small>
+    </h1>
+    <div class="service-pills" id="service-pills">
+      <span class="pill" data-svc="db"><span class="dot"></span>off-chain DB :8080</span>
+      <span class="pill" data-svc="clearing"><span class="dot"></span>clearing node :8081</span>
+      <span class="pill" data-svc="execution"><span class="dot"></span>execution node :8082</span>
+    </div>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- A: Market configuration -->
+  <section class="card" id="panel-config">
+    <h2><span class="step-no">A</span> Market Configuration</h2>
+    <p class="sub">Community sigmoid pricing parameters. The curve updates live; the same parameters are sent to the Clearing Node with the trigger.</p>
+    <div class="grid2-wide">
+      <div>
+        <label class="field">Community name
+          <input id="cfg-name" type="text" value="Community 1">
+        </label>
+        <div class="field-row">
+          <label class="field">K_upper — retail buy price (ct/kWh)
+            <input id="cfg-kupper" type="number" step="0.1" value="28.5">
+          </label>
+          <label class="field">K_lower — feed-in tariff (ct/kWh)
+            <input id="cfg-klower" type="number" step="0.1" value="8.0">
+          </label>
+        </div>
+        <div class="field-row">
+          <label class="field">θ — sigmoid midpoint
+            <input id="cfg-theta" type="number" step="0.05" value="1.0">
+          </label>
+          <label class="field">B — steepness
+            <input id="cfg-steepness" type="number" step="0.1" value="2.5">
+          </label>
+        </div>
+        <div class="notice info" id="cfg-warning" style="display:none"></div>
+      </div>
+      <div class="chart-wrap" id="cfg-chart"></div>
+    </div>
+  </section>
+
+  <!-- B: Participants -->
+  <section class="card" id="panel-participants">
+    <h2><span class="step-no">B</span> Participant Input</h2>
+    <p class="sub">Producers submit <em>offers</em> (energy for sale), consumers submit <em>bids</em> (energy demanded) for one 15-minute delivery slot.</p>
+    <div class="grid2 participants">
+      <div>
+        <h3><span class="swatch supply"></span>Producers (sellers)</h3>
+        <div id="producer-rows"></div>
+        <button class="add" id="add-producer">+ add producer</button>
+      </div>
+      <div>
+        <h3><span class="swatch demand"></span>Consumers (buyers)</h3>
+        <div id="consumer-rows"></div>
+        <button class="add" id="add-consumer">+ add consumer</button>
+      </div>
+    </div>
+    <div class="statgrid" id="live-stats"></div>
+    <div class="chart-wrap" id="live-bar"></div>
+  </section>
+
+  <!-- C: Run clearing -->
+  <section class="card" id="panel-run">
+    <h2><span class="step-no">C</span> Run Clearing</h2>
+    <p class="sub">Creates the market and orders in the off-chain DB, then triggers the Clearing Node — exactly the calls the Market Orchestrator would make.</p>
+    <button class="primary" id="run-clearing">
+      <span class="spinner"></span>▶ Run Clearing
+    </button>
+    <span class="run-status" id="run-status"></span>
+  </section>
+
+  <!-- D: Results -->
+  <section class="card hidden" id="panel-results">
+    <h2><span class="step-no">D</span> Clearing Results</h2>
+    <p class="sub" id="results-sub"></p>
+    <div id="results-body"></div>
+  </section>
+
+  <!-- E: Post-delivery -->
+  <section class="card hidden" id="panel-execution">
+    <h2><span class="step-no">E</span> Post-Delivery Simulation</h2>
+    <p class="sub">Simulate smart-meter readings after the delivery period, then run the Execution Node to compute deviation penalties.</p>
+    <div id="actuals-body"></div>
+    <button class="primary exec" id="run-execution">
+      <span class="spinner"></span>▶ Run Execution Node
+    </button>
+    <span class="run-status" id="exec-status"></span>
+    <div id="penalties-body"></div>
+  </section>
+
+  <!-- F: Architecture -->
+  <section class="card" id="panel-architecture">
+    <h2><span class="step-no">F</span> System Architecture</h2>
+    <p class="sub">PoC component map. <b style="color:#059669">Green</b> = implemented &nbsp;·&nbsp; <b style="color:#6b7280">grey</b> = mocked / not yet connected &nbsp;·&nbsp; dashed = out of scope for this PoC.</p>
+    <div class="chart-wrap">
+      <svg viewBox="0 0 960 540" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, sans-serif">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#5d6b85"/>
+          </marker>
+          <marker id="arr-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#9ca3af"/>
+          </marker>
+        </defs>
+
+        <!-- UI box -->
+        <rect x="370" y="18" width="220" height="72" rx="10" fill="#d6f5e8" stroke="#059669" stroke-width="2"/>
+        <text x="480" y="48" text-anchor="middle" font-size="15" font-weight="700" fill="#065f46">Demo UI (this page)</text>
+        <text x="480" y="68" text-anchor="middle" font-size="11.5" fill="#047857">simulates Market Orchestrator + participants</text>
+
+        <!-- Clearing node -->
+        <rect x="100" y="170" width="220" height="72" rx="10" fill="#d6f5e8" stroke="#059669" stroke-width="2"/>
+        <text x="210" y="200" text-anchor="middle" font-size="15" font-weight="700" fill="#065f46">AMM Clearing Node</text>
+        <text x="210" y="220" text-anchor="middle" font-size="11.5" fill="#047857">Python · FastAPI · :8081</text>
+
+        <!-- Execution node -->
+        <rect x="640" y="170" width="220" height="72" rx="10" fill="#d6f5e8" stroke="#059669" stroke-width="2"/>
+        <text x="750" y="200" text-anchor="middle" font-size="15" font-weight="700" fill="#065f46">AMM Execution Node</text>
+        <text x="750" y="220" text-anchor="middle" font-size="11.5" fill="#047857">Python · FastAPI · :8082</text>
+
+        <!-- Mock off-chain DB -->
+        <rect x="370" y="330" width="220" height="78" rx="10" fill="#f3f4f6" stroke="#6b7280" stroke-width="2"/>
+        <text x="480" y="358" text-anchor="middle" font-size="15" font-weight="700" fill="#374151">Mock Off-Chain DB</text>
+        <text x="480" y="376" text-anchor="middle" font-size="11.5" fill="#6b7280">in-memory · :8080 — stands in for the</text>
+        <text x="480" y="392" text-anchor="middle" font-size="11.5" fill="#6b7280">GSY-DEX off-chain DB (not yet available)</text>
+
+        <!-- Smart contract -->
+        <rect x="100" y="330" width="220" height="78" rx="10" fill="#f3f4f6" stroke="#059669" stroke-width="2" stroke-dasharray="0"/>
+        <text x="210" y="358" text-anchor="middle" font-size="15" font-weight="700" fill="#374151">AMM Smart Contract</text>
+        <text x="210" y="376" text-anchor="middle" font-size="11.5" fill="#6b7280">Solidity, implemented + tested (Hardhat);</text>
+        <text x="210" y="392" text-anchor="middle" font-size="11.5" fill="#6b7280">tx simulated in mock mode</text>
+
+        <!-- external, out of scope -->
+        <rect x="640" y="330" width="220" height="78" rx="10" fill="#fafafa" stroke="#9ca3af" stroke-width="1.6" stroke-dasharray="6 5"/>
+        <text x="750" y="358" text-anchor="middle" font-size="14" font-weight="700" fill="#6b7280">GSY DEX</text>
+        <text x="750" y="376" text-anchor="middle" font-size="11.5" fill="#9ca3af">orderbook · matching engine ·</text>
+        <text x="750" y="392" text-anchor="middle" font-size="11.5" fill="#9ca3af">user preferences (Phase 2)</text>
+
+        <rect x="640" y="446" width="220" height="58" rx="10" fill="#fafafa" stroke="#9ca3af" stroke-width="1.6" stroke-dasharray="6 5"/>
+        <text x="750" y="471" text-anchor="middle" font-size="14" font-weight="700" fill="#6b7280">EW Digital Spine</text>
+        <text x="750" y="489" text-anchor="middle" font-size="11.5" fill="#9ca3af">integration out of scope</text>
+
+        <rect x="100" y="446" width="220" height="58" rx="10" fill="#fafafa" stroke="#9ca3af" stroke-width="1.6" stroke-dasharray="6 5"/>
+        <text x="210" y="471" text-anchor="middle" font-size="14" font-weight="700" fill="#6b7280">Energy Web Chain</text>
+        <text x="210" y="489" text-anchor="middle" font-size="11.5" fill="#9ca3af">Volta testnet → mainnet (live mode)</text>
+
+        <!-- arrows -->
+        <line x1="408" y1="90" x2="248" y2="168" stroke="#5d6b85" stroke-width="1.8" marker-end="url(#arr)"/>
+        <text x="295" y="118" font-size="11.5" fill="#5d6b85">POST /trigger-clearing</text>
+
+        <line x1="552" y1="90" x2="712" y2="168" stroke="#5d6b85" stroke-width="1.8" marker-end="url(#arr)"/>
+        <text x="565" y="118" font-size="11.5" fill="#5d6b85">POST /trigger-execution</text>
+
+        <line x1="480" y1="90" x2="480" y2="328" stroke="#5d6b85" stroke-width="1.8" marker-end="url(#arr)"/>
+        <text x="488" y="160" font-size="11.5" fill="#5d6b85">POST /market · /orders-normalized</text>
+        <text x="488" y="176" font-size="11.5" fill="#5d6b85">POST /asset_measurements</text>
+
+        <line x1="290" y1="244" x2="408" y2="330" stroke="#5d6b85" stroke-width="1.8" marker-end="url(#arr)" marker-start="url(#arr)"/>
+        <text x="248" y="296" font-size="11.5" fill="#5d6b85">GET /orders · POST /trades</text>
+
+        <line x1="672" y1="244" x2="556" y2="330" stroke="#5d6b85" stroke-width="1.8" marker-end="url(#arr)" marker-start="url(#arr)"/>
+        <text x="568" y="296" font-size="11.5" fill="#5d6b85">GET /trades · /asset_measurements</text>
+
+        <line x1="210" y1="244" x2="210" y2="328" stroke="#9ca3af" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#arr-grey)"/>
+        <text x="70" y="290" font-size="11.5" fill="#9ca3af">clearMarket()</text>
+        <text x="70" y="305" font-size="11.5" fill="#9ca3af">(simulated)</text>
+
+        <line x1="210" y1="408" x2="210" y2="444" stroke="#9ca3af" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#arr-grey)"/>
+        <line x1="750" y1="408" x2="750" y2="444" stroke="#9ca3af" stroke-width="1.4" stroke-dasharray="5 4"/>
+      </svg>
+    </div>
+  </section>
+
+  <footer class="site">
+    AMMBA PoC · endpoints: <code id="ep-db"></code> · <code id="ep-clearing"></code> · <code id="ep-execution"></code>
+    — override with <code>?db=…&amp;clearing=…&amp;execution=…</code>
+  </footer>
+</div>
+
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

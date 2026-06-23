@@ -1,0 +1,100 @@
+"""AMM Clearing Node — FastAPI service (guide §4).
+
+Exposes:
+    GET  /health            liveness probe
+    POST /trigger-clearing  called by the Market Orchestrator at market close
+
+PoC note on the trigger response: the guide (§4.2) allows synchronous
+processing "if the clearing is fast enough", which it is for community-sized
+markets. The PoC therefore runs the cycle synchronously and returns 200 with
+the full clearing result so the demo UI can render it directly. A production
+deployment would return 202 Accepted and process in a background task.
+"""
+
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from src.clearing import run_clearing
+from src.config import Config, load_config
+from src.contract import BaseContractClient, ContractError, build_contract_client
+from src.offchain_db import OffchainDBClient, OffchainDBError
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("amm-clearing-node")
+
+
+class SigmoidParams(BaseModel):
+    """PoC convenience: the demo UI passes the community's sigmoid parameters
+    with the trigger. TODO(confirm-with-supervisor): production parameter
+    governance (configuration / contract owner), not trigger payloads."""
+    k_upper: float | None = None
+    k_lower: float | None = None
+    theta: float | None = None
+    steepness: float | None = None
+
+
+class TriggerClearing(BaseModel):
+    market_id: str = Field(min_length=1)
+    community_uuid: str = Field(min_length=1)
+    time_slot: int
+    community_name: str | None = None
+    sigmoid_params: SigmoidParams | None = None
+
+
+def create_app(cfg: Config | None = None,
+               db: OffchainDBClient | None = None,
+               chain: BaseContractClient | None = None) -> FastAPI:
+    cfg = cfg or load_config()
+    db = db or OffchainDBClient(cfg.offchain_db_url)
+    chain = chain or build_contract_client(cfg)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        logger.info("AMM Clearing Node up: db=%s blockchain_mode=%s "
+                    "time_slot_sec=%s", cfg.offchain_db_url,
+                    cfg.blockchain_mode, cfg.time_slot_sec)
+        yield
+        await db.close()
+
+    app = FastAPI(title="AMM Clearing Node",
+                  description=__doc__, version="0.1.0", lifespan=lifespan)
+    app.state.cfg = cfg
+    app.state.db = db
+    app.state.chain = chain
+
+    # The demo UI calls this service directly from the browser.
+    app.add_middleware(CORSMiddleware, allow_origins=["*"],
+                       allow_methods=["*"], allow_headers=["*"])
+
+    @app.get("/health")
+    async def health() -> dict:
+        return {"status": "ok", "service": "amm-clearing-node",
+                "blockchain_mode": chain.mode}
+
+    @app.post("/trigger-clearing")
+    async def trigger_clearing(trigger: TriggerClearing) -> dict:
+        payload = trigger.model_dump()
+        if payload.get("sigmoid_params") is not None:
+            payload["sigmoid_params"] = {
+                k: v for k, v in payload["sigmoid_params"].items()
+                if v is not None}
+        try:
+            return await run_clearing(payload, cfg, db, chain)
+        except OffchainDBError as exc:
+            logger.error("off-chain DB failure: %s", exc)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except ContractError as exc:
+            # On-chain failure: no trades were written; the orchestrator may
+            # re-trigger (guide §4.7).
+            logger.error("contract failure: %s", exc)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return app
+
+
+app = create_app()

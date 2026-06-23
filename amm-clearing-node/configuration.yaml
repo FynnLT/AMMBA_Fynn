@@ -1,0 +1,42 @@
+# AMM Clearing Node default configuration.
+# Environment variables always override these values (guide §4.3):
+#   OFFCHAIN_DB_URL, RPC_URL, CONTRACT_ADDRESS, CLEARING_NODE_PRIVATE_KEY,
+#   TIME_SLOT_SEC, BLOCKCHAIN_MODE, HOST, PORT
+
+application:
+  host: "0.0.0.0"
+  port: 8081
+
+offchain_db:
+  base_url: "http://localhost:8080"
+
+blockchain:
+  # "mock" simulates the on-chain anchor (no blockchain needed) — PoC default.
+  # "live" sends real clearMarket transactions; requires rpc_url,
+  # contract_address and CLEARING_NODE_PRIVATE_KEY.
+  mode: "mock"
+  rpc_url: "https://rpc.energyweb.org"
+  contract_address: ""
+
+market:
+  time_slot_sec: 900              # 15-minute slots (GSY DEX default)
+  spot_open_offset_min: -180      # market opens 3h before delivery (informational —
+  spot_close_offset_min: -60      #  the node only reacts to orchestrator triggers, §8)
+
+# Per-community sigmoid parameters. Unknown communities fall back to
+# `default_community` (the demo UI creates communities on the fly).
+communities:
+  communityid_1:
+    k_upper_ct_per_kwh: 28.5      # Retail buy price
+    k_lower_ct_per_kwh: 8.0       # Feed-in tariff
+    theta: 1.0                    # Sigmoid midpoint (optimized offline)
+    steepness: 2.5                # Sigmoid steepness (optimized offline)
+    # TODO(confirm-with-supervisor): pool naming convention + whether the pool
+    # must be registered as an area in community_areas (guide §7.1).
+    pool_id: "AMM_POOL_communityid_1"
+
+default_community:
+  k_upper_ct_per_kwh: 28.5
+  k_lower_ct_per_kwh: 8.0
+  theta: 1.0
+  steepness: 2.5

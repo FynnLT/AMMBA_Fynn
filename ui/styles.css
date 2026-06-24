@@ -99,11 +99,21 @@ label.field input:focus { outline: 2px solid var(--accent-soft); border-color: v
 .swatch.demand { background: var(--demand); }
 
 .prow { display: grid; grid-template-columns: 1fr 130px 36px; gap: 8px; margin-bottom: 8px; }
-.prow input {
+/* producer rows: name | kWh | type | pref. partner | remove */
+.prow-producer { grid-template-columns: 1fr 76px 96px 1fr 34px; }
+/* consumer rows: name | kWh | pref. partner | remove */
+.prow-consumer { grid-template-columns: 1fr 76px 1fr 34px; }
+.prow input, .prow select {
   border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
   font-size: 14px; background: #fbfcfe; width: 100%;
 }
-.prow input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.prow select { cursor: pointer; }
+.prow input:focus, .prow select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.prow-head { margin-bottom: 6px; }
+.prow-head span {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .4px;
+  color: var(--muted); font-weight: 600; align-self: center;
+}
 .prow button.remove {
   border: 1px solid var(--line); background: #fff; color: var(--muted);
   border-radius: 8px; cursor: pointer; font-size: 16px; line-height: 1;
@@ -246,6 +256,33 @@ details.json pre {
 .prow.actual { grid-template-columns: 1fr 130px 0; align-items: center; }
 .actual-name { font-size: 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .actual-name small { color: var(--muted); }
+
+/* ----------------------------- preferences & energy-type distribution */
+
+.field-row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+@media (max-width: 720px) { .field-row3 { grid-template-columns: 1fr; } }
+
+.step-no.ok { background: var(--supply-soft); color: var(--supply); }
+
+.badge.green { background: var(--supply-soft); color: var(--supply); }
+.badge.grey { background: #eef0f3; color: #586173; border: 1px solid #d8dce3; }
+
+.flow-wrap { overflow-x: auto; margin-top: 6px; }
+.flow-wrap svg { display: block; min-width: 720px; }
+
+/* fill bar inside allocation tables (bar on top, percentage below) */
+.fillbar { min-width: 120px; }
+.fillbar-track { background: #eef1f7; border-radius: 6px; height: 12px; overflow: hidden; }
+.fillbar-fill { height: 100%; border-radius: 6px; transition: width .35s ease; }
+.fillbar-fill.supply { background: var(--supply); }
+.fillbar-fill.demand { background: var(--demand); }
+.fillbar-pct { font-size: 11px; color: var(--muted); margin-top: 3px; }
+
+.balance-summary {
+  margin: 16px 0 0; padding: 12px 16px; background: #f8fafd;
+  border: 1px solid var(--line); border-radius: 10px; font-size: 14px;
+}
+.balance-summary b { color: var(--ink); }
 
 footer.site { color: var(--muted); font-size: 12.5px; text-align: center; margin-top: 30px; }
 footer.site code { background: var(--mock-soft); padding: 1px 6px; border-radius: 6px; }

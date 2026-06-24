@@ -8,9 +8,6 @@ are allocated **pro-rata**, and the aggregated result is anchored on an EVM
 chain for auditability. After delivery, deviations between traded and metered
 energy are penalized (shortfall + VCG-style externality penalties).
 
-The full system specification lives in
-[docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md) — section
-references below (§…) point there.
 
 | Component | Tech | Port | Status |
 |---|---|---|---|

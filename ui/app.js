@@ -22,22 +22,29 @@ const TIME_SLOT_SEC = 900;
 let idSeq = 0;
 const state = {
   config: { name: "Community 1", kUpper: 28.5, kLower: 8.0, theta: 1.0, steepness: 2.5 },
+  // Energy-type multipliers applied ex-post per trade (Guide §4.4 step 6.3).
+  multipliers: { greenMultiplier: 0.10, greyLevy: 0.10, levyCap: 0.20 },
   // Defaults reproduce the implementation guide's example:
   // supply 12.5 kWh vs demand 10 kWh -> ratio 1.25 -> ~15.15 ct/kWh
+  // `type` = energy source (green/grey); `partner` = preferred trading
+  // partner (id of an opposite-side participant, or null).
   producers: [
-    { id: ++idSeq, name: "Rooftop PV A", energy: 5.0 },
-    { id: ++idSeq, name: "Rooftop PV B", energy: 3.5 },
-    { id: ++idSeq, name: "Community Battery", energy: 4.0 },
+    { id: ++idSeq, name: "Rooftop PV A", energy: 5.0, type: "green", partner: null },
+    { id: ++idSeq, name: "Rooftop PV B", energy: 3.5, type: "green", partner: null },
+    { id: ++idSeq, name: "Community Battery", energy: 4.0, type: "grey", partner: null },
   ],
   consumers: [
-    { id: ++idSeq, name: "Household 1", energy: 4.5 },
-    { id: ++idSeq, name: "Household 2", energy: 3.0 },
-    { id: ++idSeq, name: "Bakery", energy: 2.5 },
+    { id: ++idSeq, name: "Household 1", energy: 4.5, partner: null },
+    { id: ++idSeq, name: "Household 2", energy: 3.0, partner: null },
+    { id: ++idSeq, name: "Bakery", energy: 2.5, partner: null },
   ],
   lastClearing: null,   // response of /trigger-clearing
   lastMarket: null,     // {market_id, community_uuid, time_slot}
   areaByName: {},       // participant name -> area_uuid for the last run
 };
+// Demo default: PV A nominates Household 1 as preferred partner, but the
+// reverse is not set -> shows the "no mutual pair" case (as in the mockups).
+state.producers[0].partner = state.consumers[0].id;
 
 // ---------------------------------------------------------------- helpers
 
@@ -59,6 +66,7 @@ const fmt = {
   ct: (v) => `${(+v).toFixed(2)} ct`,
   pct: (v) => `${(100 * v).toFixed(1)} %`,
   ratio: (v) => (+v).toFixed(3),
+  eur: (ct) => `€${(ct / 100).toFixed(2)}`,   // values are in ct -> euros
   slot: (ts) => new Date(ts * 1000).toLocaleString([], {
     dateStyle: "medium", timeStyle: "short" }),
 };
@@ -219,17 +227,44 @@ function renderConfigChart() {
 
 // --------------------------------------------------- panel B: participants
 
-function participantRow(p) {
-  return `<div class="prow" data-id="${p.id}">
-    <input type="text" data-field="name" value="${esc(p.name)}" placeholder="name">
-    <input type="number" data-field="energy" value="${p.energy}" min="0" step="0.1" placeholder="kWh">
-    <button class="remove" title="remove">✕</button>
-  </div>`;
+function partnerSelect(p, oppositeList) {
+  // Preferred trading partner: options are the opposite side, value = its id.
+  const opts = oppositeList.map((o) =>
+    `<option value="${o.id}" data-opt-id="${o.id}"${p.partner === o.id ? " selected" : ""}>${esc(o.name || "(unnamed)")}</option>`).join("");
+  return `<select data-field="partner"><option value=""${!p.partner ? " selected" : ""}>— none —</option>${opts}</select>`;
+}
+
+function participantRow(p, side, opposite) {
+  const name = `<input type="text" data-field="name" value="${esc(p.name)}" placeholder="name">`;
+  const energy = `<input type="number" data-field="energy" value="${p.energy}" min="0" step="0.1" placeholder="kWh">`;
+  const remove = `<button class="remove" title="remove">✕</button>`;
+  if (side === "producer") {
+    // producers additionally pick their energy source (green/grey)
+    const type = `<select data-field="type">
+      <option value="green"${p.type === "green" ? " selected" : ""}>Green</option>
+      <option value="grey"${p.type === "grey" ? " selected" : ""}>Grey</option>
+    </select>`;
+    return `<div class="prow prow-producer" data-id="${p.id}">${name}${energy}${type}${partnerSelect(p, opposite)}${remove}</div>`;
+  }
+  return `<div class="prow prow-consumer" data-id="${p.id}">${name}${energy}${partnerSelect(p, opposite)}${remove}</div>`;
+}
+
+// Update preferred-partner <option> labels in place when a name changes,
+// so we don't re-render rows (which would drop input focus mid-typing).
+function refreshPartnerLabels() {
+  const byId = {};
+  for (const x of [...state.producers, ...state.consumers]) byId[x.id] = x;
+  document.querySelectorAll('select[data-field="partner"] option[data-opt-id]').forEach((opt) => {
+    const m = byId[+opt.dataset.optId];
+    if (m) opt.textContent = m.name || "(unnamed)";
+  });
 }
 
 function renderParticipants() {
-  $("#producer-rows").innerHTML = state.producers.map(participantRow).join("");
-  $("#consumer-rows").innerHTML = state.consumers.map(participantRow).join("");
+  $("#producer-rows").innerHTML =
+    state.producers.map((p) => participantRow(p, "producer", state.consumers)).join("");
+  $("#consumer-rows").innerHTML =
+    state.consumers.map((c) => participantRow(c, "consumer", state.producers)).join("");
   renderLiveStats();
 }
 
@@ -253,8 +288,10 @@ function bindParticipantEvents(containerSel, list) {
     const item = list().find((p) => p.id === +row.dataset.id);
     if (!item) return;
     const field = ev.target.dataset.field;
-    if (field === "name") item.name = ev.target.value;
-    if (field === "energy") item.energy = parseFloat(ev.target.value) || 0;
+    if (field === "name") { item.name = ev.target.value; refreshPartnerLabels(); }
+    else if (field === "energy") item.energy = parseFloat(ev.target.value) || 0;
+    else if (field === "type") item.type = ev.target.value;
+    else if (field === "partner") item.partner = ev.target.value ? +ev.target.value : null;
     renderLiveStats();
   });
   container.addEventListener("click", (ev) => {
@@ -590,6 +627,242 @@ function renderPenalties(res) {
     ${counterfactualChart(res)}`;
 }
 
+// ------------------- panel C: preferences & energy-type multipliers (sim)
+//
+// Client-side simulation of the Phase-2 allocation rules (Guide §4.4 step 6 /
+// §6) that the backend leaves as a documented stub until the GSY DEX
+// preferences API exists:
+//   1. mutual preferred partners are matched first at the clearing price,
+//   2. the residual is split pro-rata,
+//   3. energy-type multipliers adjust the per-trade price ex-post, with
+//      dynamic subsidy scaling so the green bonus stays funded by grey levy.
+// Runs entirely in the browser; it does not touch the off-chain DB or nodes.
+
+function readMultiplierInputs() {
+  state.multipliers = {
+    greenMultiplier: parseFloat($("#pref-green").value) || 0,
+    greyLevy: parseFloat($("#pref-greylevy").value) || 0,
+    levyCap: parseFloat($("#pref-levycap").value) || 0,
+  };
+  return state.multipliers;
+}
+
+function computePreferenceClearing() {
+  readConfigInputs();
+  const m = readMultiplierInputs();
+  const producers = state.producers
+    .filter((p) => p.name.trim() && p.energy > 0)
+    .map((p) => ({ ...p, type: p.type === "grey" ? "grey" : "green" }));
+  const consumers = state.consumers.filter((c) => c.name.trim() && c.energy > 0);
+
+  const supply = producers.reduce((s, p) => s + p.energy, 0);
+  const demand = consumers.reduce((s, c) => s + c.energy, 0);
+  if (supply <= 0 || demand <= 0) return { producers, consumers, supply, demand, noTrade: true };
+
+  const ratio = supply / demand;
+  const clearing = sigmoidPrice(ratio, state.config);
+  const traded = Math.min(supply, demand);
+  const roundType = supply < demand ? "SUPPLY_LIMITED"
+    : supply > demand ? "DEMAND_LIMITED" : "BALANCED";
+
+  // --- step 1: mutual preferred pairs (each participant in at most one) ----
+  const usedP = new Set(), usedC = new Set();
+  const pairs = [];
+  for (const p of producers) {
+    if (!p.partner || usedP.has(p.id)) continue;
+    const c = consumers.find((x) => x.id === p.partner);
+    if (c && c.partner === p.id && !usedC.has(c.id)) {
+      pairs.push({ producer: p, consumer: c, volume: Math.min(p.energy, c.energy) });
+      usedP.add(p.id); usedC.add(c.id);
+    }
+  }
+  let matched = pairs.reduce((s, pr) => s + pr.volume, 0);
+  if (matched > traded) {                     // safety: never exceed traded qty
+    const k = traded / matched;
+    pairs.forEach((pr) => { pr.volume *= k; });
+    matched = traded;
+  }
+  const matchedP = new Map(), matchedC = new Map();
+  pairs.forEach((pr) => {
+    matchedP.set(pr.producer.id, pr.volume);
+    matchedC.set(pr.consumer.id, pr.volume);
+  });
+
+  // --- step 2: pro-rata on the residual -----------------------------------
+  const residual = traded - matched;
+  const remSupply = supply - matched, remDemand = demand - matched;
+  const pAlloc = new Map(), cAlloc = new Map();
+  for (const p of producers) {
+    const mv = matchedP.get(p.id) || 0;
+    pAlloc.set(p.id, mv + (remSupply > 0 ? (p.energy - mv) * (residual / remSupply) : 0));
+  }
+  for (const c of consumers) {
+    const mv = matchedC.get(c.id) || 0;
+    cAlloc.set(c.id, mv + (remDemand > 0 ? (c.energy - mv) * (residual / remDemand) : 0));
+  }
+
+  // --- step 3: energy-type multipliers (ex-post) + dynamic subsidy scaling -
+  const greyLevyEff = Math.min(m.greyLevy, m.levyCap);
+  let greenAlloc = 0, greyAlloc = 0;
+  for (const p of producers) {
+    if (p.type === "grey") greyAlloc += pAlloc.get(p.id);
+    else greenAlloc += pAlloc.get(p.id);
+  }
+  const levyCollected = greyAlloc * clearing * greyLevyEff;          // ct
+  const bonusRequested = greenAlloc * clearing * m.greenMultiplier;  // ct
+  // green bonuses are funded by grey levy revenue; scale down if insufficient
+  const scale = bonusRequested > 1e-9 ? Math.min(1, levyCollected / bonusRequested) : 1;
+  const effGreen = m.greenMultiplier * scale;
+  const greenFinal = clearing * (1 + effGreen);
+  const greyFinal = clearing * (1 - greyLevyEff);
+  const bonusPaid = scale * bonusRequested;
+
+  const buyersPay = traded * clearing;
+  const sellersReceive = greenAlloc * greenFinal + greyAlloc * greyFinal;
+
+  return {
+    producers, consumers, supply, demand, ratio, clearing, traded, roundType,
+    pairs, matched, pAlloc, cAlloc, m, greyLevyEff, greenAlloc, greyAlloc,
+    levyCollected, bonusRequested, bonusPaid, scale, effGreen,
+    greenFinal, greyFinal, buyersPay, sellersReceive,
+    poolSurplus: buyersPay - sellersReceive,
+    finalPrice: (p) => (p.type === "grey" ? greyFinal : greenFinal),
+  };
+}
+
+function trunc(s, n) { s = String(s); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+
+function fillCell(rate, cls) {
+  const pct = Math.max(0, Math.min(100, rate * 100));
+  return `<div class="fillbar"><div class="fillbar-track"><div class="fillbar-fill ${cls}" style="width:${pct.toFixed(1)}%"></div></div><div class="fillbar-pct">${pct.toFixed(0)}%</div></div>`;
+}
+
+// Sankey-style flow: producers -> community pool -> consumers.
+function flowDiagram(r) {
+  const P = r.producers, C = r.consumers;
+  const W = 1080, boxW = 248, boxH = 56, poolW = 120, poolH = 150, padTop = 16, gap = 24;
+  const n = Math.max(P.length, C.length, 1);
+  const H = Math.max(n * (boxH + gap) - gap + padTop * 2, poolH + 40);
+  const leftX = 24, rightX = W - 24 - boxW;
+  const poolX = (W - poolW) / 2, poolY = (H - poolH) / 2, centerY = H / 2;
+  const maxA = Math.max(0.001,
+    ...P.map((p) => r.pAlloc.get(p.id) || 0), ...C.map((c) => r.cAlloc.get(c.id) || 0));
+  const ys = (count) => {
+    if (count <= 1) return [(H - boxH) / 2];
+    const usable = H - padTop * 2 - boxH;
+    return Array.from({ length: count }, (_, i) => padTop + usable * i / (count - 1));
+  };
+  const pys = ys(P.length), cys = ys(C.length);
+  const bandW = (a) => 3 + (a / maxA) * 22;
+  let bands = "", boxes = "";
+
+  P.forEach((p, i) => {
+    const a = r.pAlloc.get(p.id) || 0;
+    const y0 = pys[i] + boxH / 2, x0 = leftX + boxW;
+    const y1 = poolY + poolH * (i + 0.5) / P.length, x1 = poolX;
+    const stroke = p.type === "grey" ? "#9ca3af" : "#34a877";
+    bands += `<path d="M${x0},${y0} C${(x0 + x1) / 2},${y0} ${(x0 + x1) / 2},${y1} ${x1},${y1}" fill="none" stroke="${stroke}" stroke-width="${bandW(a)}" stroke-opacity="0.55"/>`;
+    const bg = p.type === "grey" ? "#f3f4f6" : "#d6f5e8";
+    const bd = p.type === "grey" ? "#9ca3af" : "#34a877";
+    const ink = p.type === "grey" ? "#586173" : "#065f46";
+    boxes += `<g><rect x="${leftX}" y="${pys[i]}" width="${boxW}" height="${boxH}" rx="9" fill="${bg}" stroke="${bd}" stroke-width="1.6"/>`
+      + `<text x="${leftX + 14}" y="${pys[i] + 23}" font-size="14" font-weight="700" fill="${ink}">${esc(trunc(p.name, 22))}</text>`
+      + `<text x="${leftX + 14}" y="${pys[i] + 42}" font-size="12" fill="${ink}" opacity="0.85">${a.toFixed(2)} kWh · ${p.type}</text></g>`;
+  });
+  C.forEach((c, i) => {
+    const a = r.cAlloc.get(c.id) || 0;
+    const y0 = cys[i] + boxH / 2, x0 = rightX;
+    const y1 = poolY + poolH * (i + 0.5) / C.length, x1 = poolX + poolW;
+    bands += `<path d="M${x1},${y1} C${(x0 + x1) / 2},${y1} ${(x0 + x1) / 2},${y0} ${x0},${y0}" fill="none" stroke="#3b82c4" stroke-width="${bandW(a)}" stroke-opacity="0.5"/>`;
+    boxes += `<g><rect x="${rightX}" y="${cys[i]}" width="${boxW}" height="${boxH}" rx="9" fill="#dbeffc" stroke="#3b82c4" stroke-width="1.6"/>`
+      + `<text x="${rightX + 14}" y="${cys[i] + 23}" font-size="14" font-weight="700" fill="#0c4a6e">${esc(trunc(c.name, 22))}</text>`
+      + `<text x="${rightX + 14}" y="${cys[i] + 42}" font-size="12" fill="#0c4a6e" opacity="0.85">${a.toFixed(2)} kWh</text></g>`;
+  });
+  const pool = `<rect x="${poolX}" y="${poolY}" width="${poolW}" height="${poolH}" rx="12" fill="#ece9fd" stroke="#7c6df2" stroke-width="2"/>`
+    + `<text x="${poolX + poolW / 2}" y="${centerY - 4}" text-anchor="middle" font-size="16" font-weight="800" fill="#4f46e5">POOL</text>`
+    + `<text x="${poolX + poolW / 2}" y="${centerY + 16}" text-anchor="middle" font-size="12" fill="#5b54b8">${r.traded.toFixed(2)} kWh</text>`;
+  return `<div class="flow-wrap"><svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" width="100%" font-family="Segoe UI, sans-serif">${bands}${pool}${boxes}</svg></div>`;
+}
+
+function renderDistribution(r) {
+  const trades = r.producers.length + r.consumers.length;
+  const limited = r.roundType === "DEMAND_LIMITED" ? "demand-limited (sellers rationed)"
+    : r.roundType === "SUPPLY_LIMITED" ? "supply-limited (buyers rationed)" : "balanced";
+
+  const prodRows = r.producers.map((p) => {
+    const a = r.pAlloc.get(p.id) || 0, fin = r.finalPrice(p);
+    return `<tr>
+      <td>${esc(p.name)}</td>
+      <td><span class="badge ${p.type}">${p.type}</span></td>
+      <td class="num">${p.energy.toFixed(2)}</td>
+      <td class="num">${a.toFixed(3)}</td>
+      <td>${fillCell(p.energy > 0 ? a / p.energy : 0, "supply")}</td>
+      <td class="num">${fin.toFixed(2)}</td>
+      <td class="num">${fmt.eur(a * fin)}</td></tr>`;
+  }).join("");
+
+  const consRows = r.consumers.map((c) => {
+    const a = r.cAlloc.get(c.id) || 0;
+    return `<tr>
+      <td>${esc(c.name)}</td>
+      <td class="num">${c.energy.toFixed(2)}</td>
+      <td class="num">${a.toFixed(3)}</td>
+      <td>${fillCell(c.energy > 0 ? a / c.energy : 0, "demand")}</td>
+      <td class="num">${r.clearing.toFixed(2)}</td>
+      <td class="num">${fmt.eur(a * r.clearing)}</td></tr>`;
+  }).join("");
+
+  const prefHtml = r.pairs.length
+    ? r.pairs.map((pr) => `<div class="cf-block"><div class="cf-title">${esc(pr.producer.name)} ↔ ${esc(pr.consumer.name)} <small>— ${pr.volume.toFixed(2)} kWh matched at the clearing price (priority before pro-rata)</small></div></div>`).join("")
+    : `<div class="notice info">No mutual preferred pairs found — full volume allocated pro-rata. (A match requires both sides to select each other as preferred partner.)</div>`;
+
+  let scalingNotice = "";
+  if (r.greenAlloc > 0 && r.scale < 1 - 1e-9) {
+    scalingNotice = `<div class="notice warn">Grey levy revenue (${fmt.eur(r.levyCollected)}) does not fully cover the requested green bonus (${fmt.eur(r.bonusRequested)}). Dynamic subsidy scaling applied: green bonus reduced to ${(r.scale * 100).toFixed(0)}% so it stays self-funded.</div>`;
+  } else if (r.greenAlloc > 0 && r.greyAlloc > 0) {
+    scalingNotice = `<div class="notice info">Grey levy revenue (${fmt.eur(r.levyCollected)}) fully funds the green bonus (${fmt.eur(r.bonusPaid)}); the remainder is a pool levy surplus.</div>`;
+  }
+
+  $("#dist-body").innerHTML = `
+    <div class="statgrid">
+      <div class="stat price"><div class="k">Clearing price</div><div class="v">${r.clearing.toFixed(2)} <small>ct/kWh</small></div></div>
+      <div class="stat"><div class="k">Traded quantity</div><div class="v">${r.traded.toFixed(2)} <small>kWh</small></div></div>
+      <div class="stat"><div class="k">Trades generated</div><div class="v">${trades} <small>via pool</small></div></div>
+      <div class="stat price"><div class="k">Preferred-matched</div><div class="v">${r.matched.toFixed(2)} <small>kWh</small></div></div>
+    </div>
+    <div class="notice info">Market is <b>${limited}</b>. Traded quantity = min(supply, demand) = ${r.traded.toFixed(2)} kWh. Every participant settles against the community pool at the uniform clearing price.</div>
+    <div class="tablecap" style="margin-top:16px">Energy distribution flow</div>
+    ${flowDiagram(r)}
+    <div class="tablecap" style="margin-top:18px"><span class="swatch supply"></span>Producers — allocation &amp; revenue</div>
+    <table class="data"><thead><tr><th>Producer</th><th>Type</th><th class="num">Offered</th><th class="num">Allocated</th><th>Fill</th><th class="num">Final ct/kWh</th><th class="num">Revenue</th></tr></thead><tbody>${prodRows}</tbody></table>
+    <div class="tablecap" style="margin-top:18px"><span class="swatch demand"></span>Consumers — allocation &amp; cost</div>
+    <table class="data"><thead><tr><th>Consumer</th><th class="num">Demanded</th><th class="num">Allocated</th><th>Fill</th><th class="num">ct/kWh</th><th class="num">Cost</th></tr></thead><tbody>${consRows}</tbody></table>
+    <div class="tablecap" style="margin-top:18px">Preferred trading-partner matches</div>
+    ${prefHtml}
+    <div class="tablecap" style="margin-top:18px">Energy-type economics (ex-post multipliers)</div>
+    <div class="statgrid">
+      <div class="stat"><div class="k">Grey levy collected</div><div class="v">${fmt.eur(r.levyCollected)}</div></div>
+      <div class="stat supply"><div class="k">Green bonus paid</div><div class="v">${fmt.eur(r.bonusPaid)}</div></div>
+      <div class="stat"><div class="k">Effective grey levy</div><div class="v">${(r.greyLevyEff * 100).toFixed(1)}<small>%</small></div></div>
+    </div>
+    ${scalingNotice}
+    <p class="balance-summary">Buyers pay <b>${fmt.eur(r.buyersPay)}</b> · Sellers receive <b>${fmt.eur(r.sellersReceive)}</b> · Pool levy surplus <b>${fmt.eur(r.poolSurplus)}</b></p>`;
+}
+
+function runPreferenceSimulation() {
+  const panel = $("#panel-dist");
+  panel.classList.remove("hidden");
+  const r = computePreferenceClearing();
+  if (r.noTrade) {
+    $("#dist-body").innerHTML = `<div class="notice warn"><b>No trade.</b> Supply or demand is zero (supply ${r.supply.toFixed(2)} kWh, demand ${r.demand.toFixed(2)} kWh) — add at least one producer and one consumer.</div>`;
+    $("#pref-status").textContent = "no trade";
+  } else {
+    renderDistribution(r);
+    $("#pref-status").textContent = `done — ${r.clearing.toFixed(2)} ct/kWh, ${r.traded.toFixed(2)} kWh traded`;
+  }
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 // ------------------------------------------------------------ service pings
 
 async function pingServices() {
@@ -631,14 +904,19 @@ document.addEventListener("DOMContentLoaded", () => {
   bindParticipantEvents("#producer-rows", () => state.producers);
   bindParticipantEvents("#consumer-rows", () => state.consumers);
   $("#add-producer").addEventListener("click", () => {
-    state.producers.push({ id: ++idSeq, name: `Producer ${state.producers.length + 1}`, energy: 1.0 });
+    state.producers.push({ id: ++idSeq, name: `Producer ${state.producers.length + 1}`, energy: 1.0, type: "green", partner: null });
     renderParticipants();
   });
   $("#add-consumer").addEventListener("click", () => {
-    state.consumers.push({ id: ++idSeq, name: `Consumer ${state.consumers.length + 1}`, energy: 1.0 });
+    state.consumers.push({ id: ++idSeq, name: `Consumer ${state.consumers.length + 1}`, energy: 1.0, partner: null });
     renderParticipants();
   });
 
+  for (const id of ["pref-green", "pref-greylevy", "pref-levycap"]) {
+    document.getElementById(id).addEventListener("input", readMultiplierInputs);
+  }
+
+  $("#run-preferences").addEventListener("click", runPreferenceSimulation);
   $("#run-clearing").addEventListener("click", runClearing);
   $("#run-execution").addEventListener("click", runExecution);
 

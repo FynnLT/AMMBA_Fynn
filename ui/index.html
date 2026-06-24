@@ -62,11 +62,17 @@
     <div class="grid2 participants">
       <div>
         <h3><span class="swatch supply"></span>Producers (sellers)</h3>
+        <div class="prow prow-producer prow-head">
+          <span>Name</span><span>kWh</span><span>Type</span><span>Pref. partner</span><span></span>
+        </div>
         <div id="producer-rows"></div>
         <button class="add" id="add-producer">+ add producer</button>
       </div>
       <div>
         <h3><span class="swatch demand"></span>Consumers (buyers)</h3>
+        <div class="prow prow-consumer prow-head">
+          <span>Name</span><span>kWh</span><span>Pref. partner</span><span></span>
+        </div>
         <div id="consumer-rows"></div>
         <button class="add" id="add-consumer">+ add consumer</button>
       </div>
@@ -75,10 +81,41 @@
     <div class="chart-wrap" id="live-bar"></div>
   </section>
 
-  <!-- C: Run clearing -->
+  <!-- C: Preferences & energy-type multipliers -->
+  <section class="card" id="panel-preferences">
+    <h2><span class="step-no">C</span> Preferences &amp; Energy-Type Multipliers</h2>
+    <p class="sub">Allocation rules applied during clearing (Guide §6, Phase 2): (1) mutual preferred partners are matched first at the clearing price, (2) the residual pool is split pro-rata, (3) energy-type multipliers adjust the per-trade price ex-post.</p>
+    <div class="field-row3">
+      <label class="field">Green multiplier (bonus)
+        <input id="pref-green" type="number" step="0.01" min="0" value="0.10">
+      </label>
+      <label class="field">Grey levy (discount)
+        <input id="pref-greylevy" type="number" step="0.01" min="0" value="0.10">
+      </label>
+      <label class="field">Levy cap (max)
+        <input id="pref-levycap" type="number" step="0.01" min="0" value="0.20">
+      </label>
+    </div>
+    <div class="notice info">
+      <b>Green:</b> final = clearing × (1 + green_multiplier) &nbsp;·&nbsp; <b>Grey:</b> final = clearing × (1 − min(grey_levy, levy_cap)) &nbsp;·&nbsp; green bonuses are funded by grey levy revenue; if revenue is insufficient the bonus is scaled down (dynamic subsidy scaling).
+    </div>
+    <button class="primary" id="run-preferences" style="margin-top:14px">
+      <span class="spinner"></span>▶ Ausführen
+    </button>
+    <span class="run-status" id="pref-status"></span>
+  </section>
+
+  <!-- Result: clearing result & distribution (preference-aware simulation) -->
+  <section class="card hidden" id="panel-dist">
+    <h2><span class="step-no ok">✓</span> Clearing Result &amp; Distribution</h2>
+    <p class="sub">Outcome of the batch auction for this delivery slot — preference-aware simulation, computed in-browser.</p>
+    <div id="dist-body"></div>
+  </section>
+
+  <!-- Run clearing (real backend round-trip) -->
   <section class="card" id="panel-run">
-    <h2><span class="step-no">C</span> Run Clearing</h2>
-    <p class="sub">Creates the market and orders in the off-chain DB, then triggers the Clearing Node — exactly the calls the Market Orchestrator would make.</p>
+    <h2><span class="step-no">⚙</span> Run Clearing <small style="font-weight:400;color:var(--muted)">— backend round-trip</small></h2>
+    <p class="sub">Creates the market and orders in the off-chain DB, then triggers the Clearing Node — exactly the calls the Market Orchestrator would make. Uniform-price pro-rata clearing (without the Phase-2 preferences above, which the backend still stubs).</p>
     <button class="primary" id="run-clearing">
       <span class="spinner"></span>▶ Run Clearing
     </button>

@@ -8,6 +8,7 @@ from the trade objects' `parameters` field — the Execution Node is
 self-contained from trades + measurements alone (guide §5.4).
 """
 
+import asyncio
 import logging
 import time
 
@@ -67,15 +68,6 @@ def _participant_from_trade(trade: dict) -> dict | None:
     return None
 
 
-async def _actual_kwh(db: OffchainDBClient, community_uuid: str,
-                      area_uuid: str, time_slot: int) -> float | None:
-    measurements = await db.get_measurements(community_uuid, area_uuid)
-    for m in measurements:
-        if m.get("time_slot") == time_slot:
-            return float(m["energy_kwh"])
-    return None
-
-
 async def run_execution(trigger: dict, cfg: Config,
                         db: OffchainDBClient) -> dict:
     market_id = trigger["market_id"]
@@ -102,15 +94,18 @@ async def run_execution(trigger: dict, cfg: Config,
     traded_quantity = min(total_supply, total_demand)
     round_kind = determine_round_type(total_supply, total_demand)
 
+    measurements = await db.get_measurements(community_uuid, time_slot=time_slot)
+    actual_by_area = {m["area_uuid"]: float(m["energy_kwh"]) for m in measurements}
+
     results = []
     total_penalties = 0.0
+    writes = []
     for trade in trades:
         participant = _participant_from_trade(trade)
         if participant is None:
             continue
 
-        actual = await _actual_kwh(db, community_uuid,
-                                   participant["area_uuid"], time_slot)
+        actual = actual_by_area.get(participant["area_uuid"])
         measurement_found = actual is not None
         if not measurement_found:
             # No meter data: assume delivery as traded (no penalty) but flag
@@ -169,18 +164,20 @@ async def run_execution(trigger: dict, cfg: Config,
         # TODO(confirm-with-supervisor): penalty output schema (guide §7.5).
         # NOTE: re-triggering recomputes and overwrites — handy for demos;
         # production idempotency policy TBD.
-        await db.update_trade(trade["trade_uuid"], status="Executed",
-                              parameters={
-                                  "actual_kwh": row["actual_kwh"],
-                                  "measurement_found": measurement_found,
-                                  "shortfall_kwh": row["shortfall_kwh"],
-                                  "shortfall_penalty_ct": row["shortfall_penalty_ct"],
-                                  "externality_kwh": row["externality_kwh"],
-                                  "externality_penalty_ct": row["externality_penalty_ct"],
-                                  "total_penalty_ct": row["total_penalty_ct"],
-                                  "round_type": round_kind,
-                                  "execution_time": int(time.time()),
-                              })
+        writes.append(db.update_trade(trade["trade_uuid"], status="Executed",
+                                      parameters={
+                                          "actual_kwh": row["actual_kwh"],
+                                          "measurement_found": measurement_found,
+                                          "shortfall_kwh": row["shortfall_kwh"],
+                                          "shortfall_penalty_ct": row["shortfall_penalty_ct"],
+                                          "externality_kwh": row["externality_kwh"],
+                                          "externality_penalty_ct": row["externality_penalty_ct"],
+                                          "total_penalty_ct": row["total_penalty_ct"],
+                                          "round_type": round_kind,
+                                          "execution_time": int(time.time()),
+                                      }))
+
+    await asyncio.gather(*writes)
 
     logger.info("execution done: market=%s, %d participants, %.4f ct total "
                 "penalties (%s round)", market_id, len(results),

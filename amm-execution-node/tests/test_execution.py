@@ -75,11 +75,12 @@ class FakeOffchainDB:
         return [t for t in self.trades.values()
                 if t["market_id"] == market_id]
 
-    async def get_measurements(self, community_uuid, area_uuid):
+    async def get_measurements(self, community_uuid, area_uuid=None, time_slot=None):
         return [{"community_uuid": community_uuid, "area_uuid": area,
                  "time_slot": slot, "energy_kwh": kwh}
                 for (area, slot), kwh in self.measurements.items()
-                if area == area_uuid]
+                if (area_uuid is None or area == area_uuid)
+                and (time_slot is None or slot == time_slot)]
 
     async def get_community_markets(self, community_uuid):
         return self.markets

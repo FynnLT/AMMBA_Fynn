@@ -6,6 +6,7 @@ result on-chain, allocate pro-rata, write trade objects to the off-chain DB
 and update order statuses.
 """
 
+import asyncio
 import logging
 
 from src.config import Config, resolve_community
@@ -140,8 +141,8 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
 
     if total_supply_kwh <= 0 or total_demand_kwh <= 0:
         # One-sided market: no trade for this slot, expire everything.
-        for order in open_orders:
-            await db.update_order(order["order_id"], status="Expired")
+        await asyncio.gather(*(db.update_order(o["order_id"], status="Expired")
+                               for o in open_orders))
         logger.info("no trade for market %s (one side empty); %d orders expired",
                     market_id, len(open_orders))
         return {
@@ -197,11 +198,11 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
 
     # ---- Step 8: persist trades, then update order statuses -------------
     await db.post_trades(trades)
-    for order in bids + offers:
-        # TODO(confirm-with-supervisor): residual policy for partial fills
-        # (guide §7.8). PoC marks every matched order Executed; the residual
-        # amount is recorded on the trade object (residual_bid/-_offer).
-        await db.update_order(order["order_id"], status="Executed")
+    # TODO(confirm-with-supervisor): residual policy for partial fills
+    # (guide §7.8). PoC marks every matched order Executed; the residual
+    # amount is recorded on the trade object (residual_bid/-_offer).
+    await asyncio.gather(*(db.update_order(o["order_id"], status="Executed")
+                           for o in bids + offers))
 
     logger.info("market %s cleared: %d trades written, tx %s",
                 market_id, len(trades), tx_hash)

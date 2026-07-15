@@ -212,17 +212,22 @@ function readConfigInputs() {
   };
 }
 
+let _chartRaf = 0;
 function renderConfigChart() {
-  const { ratio } = totals();
-  $("#cfg-chart").innerHTML = sigmoidChartSVG(state.config,
-    ratio != null ? { ratio } : null);
-  const warning = $("#cfg-warning");
-  if (state.config.kUpper <= state.config.kLower) {
-    warning.style.display = "";
-    warning.textContent = "K_upper ≤ K_lower: degenerate price band — the clearing price is fixed at K_lower.";
-  } else {
-    warning.style.display = "none";
-  }
+  if (_chartRaf) return;
+  _chartRaf = requestAnimationFrame(() => {
+    _chartRaf = 0;
+    const { ratio } = totals();
+    $("#cfg-chart").innerHTML = sigmoidChartSVG(state.config,
+      ratio != null ? { ratio } : null);
+    const warning = $("#cfg-warning");
+    if (state.config.kUpper <= state.config.kLower) {
+      warning.style.display = "";
+      warning.textContent = "K_upper ≤ K_lower: degenerate price band — the clearing price is fixed at K_lower.";
+    } else {
+      warning.style.display = "none";
+    }
+  });
 }
 
 // --------------------------------------------------- panel B: participants
@@ -871,7 +876,7 @@ async function pingServices() {
     ["clearing", `${EP.clearing}/health`],
     ["execution", `${EP.execution}/health`],
   ];
-  for (const [svc, url] of targets) {
+  await Promise.allSettled(targets.map(async ([svc, url]) => {
     const pill = document.querySelector(`.pill[data-svc="${svc}"]`);
     try {
       const resp = await fetch(url, { signal: AbortSignal.timeout(4000) });
@@ -881,7 +886,7 @@ async function pingServices() {
       pill.classList.remove("up");
       pill.classList.add("down");
     }
-  }
+  }));
 }
 
 // ------------------------------------------------------------------- init

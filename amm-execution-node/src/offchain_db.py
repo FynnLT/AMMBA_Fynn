@@ -42,11 +42,18 @@ class OffchainDBClient:
                                    params={"market_id": market_id})
 
     async def get_measurements(self, community_uuid: str,
-                               area_uuid: str) -> list[dict]:
-        """Post-delivery smart-meter data for one asset (guide §2)."""
+                               area_uuid: str | None = None,
+                               time_slot: int | None = None) -> list[dict]:
+        """Post-delivery smart-meter data (guide §2). Omit `area_uuid` to
+        fetch the whole community in one request; `time_slot` narrows
+        server-side."""
+        params: dict = {"community_uuid": community_uuid}
+        if area_uuid is not None:
+            params["area_uuid"] = area_uuid
+        if time_slot is not None:
+            params["time_slot"] = time_slot
         return await self._request(
-            "GET", "/asset_measurements",
-            params={"community_uuid": community_uuid, "area_uuid": area_uuid})
+            "GET", "/asset_measurements", params=params)
 
     async def get_community_markets(self, community_uuid: str) -> list[dict]:
         return await self._request(

@@ -22,7 +22,7 @@ $services = @(
     @{ Name = "mock-offchain-db";   Dir = "mock-offchain-db";   Port = 8080; Args = @("-m","uvicorn","src.main:app","--port","8080") },
     @{ Name = "amm-clearing-node";  Dir = "amm-clearing-node";  Port = 8081; Args = @("-m","uvicorn","src.main:app","--port","8081") },
     @{ Name = "amm-execution-node"; Dir = "amm-execution-node"; Port = 8082; Args = @("-m","uvicorn","src.main:app","--port","8082") },
-    @{ Name = "ui (static server)"; Dir = ".";                  Port = 3000; Args = @("-m","http.server","3000","--directory","ui") }
+    @{ Name = "ui (static server)"; Dir = ".";                  Port = 3000; Args = @("scripts\serve_ui.py","3000") }
 )
 
 foreach ($svc in $services) {

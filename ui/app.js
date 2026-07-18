@@ -412,7 +412,7 @@ async function runClearing() {
     state.lastMarket = { market_id: market.market_id,
                          community_uuid: communityUuid, time_slot: timeSlot };
     status.textContent = `done — market ${market.market_id.slice(0, 12)}…`;
-    renderResults(result);
+    renderBackendResults(result);
     renderActuals(result);
   } catch (err) {
     status.textContent = "failed";
@@ -422,98 +422,166 @@ async function runClearing() {
   }
 }
 
-// ------------------------------------------------------- panel D: results
+// --------------------------------------------- panel: Clearing Results
+//
+// Overview of the backend round-trip (dashboard mockup layout). The
+// Phase-2 energy-type multipliers from C are overlaid ex-post in-browser
+// — the backend clearing itself still stubs them.
 
 function roundBadge(roundType) {
   const cls = (roundType || "").toLowerCase().replace("_", "-");
   return `<span class="badge ${cls}">${esc((roundType || "").replace("_", "-"))}</span>`;
 }
 
-function allocationTable(rows, kind) {
-  const qtyHead = kind === "producer" ? "Offered" : "Demanded";
-  const valHead = kind === "producer" ? "Revenue" : "Cost";
-  const body = rows.map((r) => `<tr>
-      <td>${esc(r.name)}</td>
-      <td class="num">${fmt.kwh(r.requested_kwh)}</td>
-      <td class="num">${fmt.kwh(r.allocated_kwh)}</td>
-      <td class="num">${fmt.pct(r.fill_rate)}</td>
-      <td class="num">${fmt.ct(r.value_ct)}</td>
-    </tr>`).join("");
-  const totals_ = rows.reduce((a, r) => ({
-    req: a.req + r.requested_kwh, alloc: a.alloc + r.allocated_kwh,
-    val: a.val + r.value_ct }), { req: 0, alloc: 0, val: 0 });
-  return `<table class="data">
-    <thead><tr><th>Name</th><th class="num">${qtyHead}</th><th class="num">Allocated</th>
-      <th class="num">Fill rate</th><th class="num">${valHead}</th></tr></thead>
-    <tbody>${body}</tbody>
-    <tfoot><tr><td>Total</td><td class="num">${fmt.kwh(totals_.req)}</td>
-      <td class="num">${fmt.kwh(totals_.alloc)}</td><td class="num"></td>
-      <td class="num">${fmt.ct(totals_.val)}</td></tr></tfoot>
-  </table>`;
+function producersTable(r) {
+  const rows = r.producers.map((p) => {
+    const fin = p.type === "grey" ? r.greyFinal : r.greenFinal;
+    return `<tr>
+      <td>${esc(p.name)}</td>
+      <td><span class="badge ${p.type}">${p.type}</span></td>
+      <td class="num">${p.requested.toFixed(2)}</td>
+      <td class="num">${p.allocated.toFixed(3)}</td>
+      <td>${fillCell(p.requested > 0 ? p.allocated / p.requested : 0, "supply")}</td>
+      <td class="num">${fin.toFixed(2)}</td>
+      <td class="num">${fmt.eur(p.allocated * fin)}</td></tr>`;
+  }).join("");
+  return `<table class="data"><thead><tr><th>Producer</th><th>Type</th><th class="num">Offered</th><th class="num">Allocated</th><th>Fill</th><th class="num">Final ct/kWh</th><th class="num">Revenue</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
-function renderResults(res) {
+function consumersTable(r) {
+  const rows = r.consumers.map((c) => `<tr>
+      <td>${esc(c.name)}</td>
+      <td class="num">${c.requested.toFixed(2)}</td>
+      <td class="num">${c.allocated.toFixed(3)}</td>
+      <td>${fillCell(c.requested > 0 ? c.allocated / c.requested : 0, "demand")}</td>
+      <td class="num">${r.clearing.toFixed(2)}</td>
+      <td class="num">${fmt.eur(c.allocated * r.clearing)}</td></tr>`).join("");
+  return `<table class="data"><thead><tr><th>Consumer</th><th class="num">Demanded</th><th class="num">Allocated</th><th>Fill</th><th class="num">ct/kWh</th><th class="num">Cost</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function preferredMatchesHtml(r) {
+  return r.mutualPairs.length
+    ? `<div class="notice info">Mutual preferred pair(s) configured (${esc(r.mutualPairs.join(", "))}), but the backend clearing stubs Phase-2 preferences — the full volume was allocated pro-rata.</div>`
+    : `<div class="notice info">No mutual preferred pairs found — full volume allocated pro-rata. (A match requires both sides to select each other as preferred partner.)</div>`;
+}
+
+function scalingNoticeHtml(r) {
+  if (r.greenAlloc > 0 && r.scale < 1 - 1e-9) {
+    return `<div class="notice warn">Grey levy revenue (${fmt.eur(r.levyCollected)}) does not fully cover the requested green bonus (${fmt.eur(r.bonusRequested)}). Dynamic subsidy scaling applied: green bonus reduced to ${(r.scale * 100).toFixed(0)}% so it stays self-funded.</div>`;
+  }
+  if (r.greenAlloc > 0 && r.greyAlloc > 0) {
+    return `<div class="notice info">Grey levy revenue (${fmt.eur(r.levyCollected)}) fully funds the green bonus (${fmt.eur(r.bonusPaid)}); the remainder is a pool levy surplus.</div>`;
+  }
+  return "";
+}
+
+function renderClearingResults(r) {
   const panel = $("#panel-results");
   panel.classList.remove("hidden");
-  const sub = $("#results-sub");
-  const body = $("#results-body");
+  $("#results-sub").textContent =
+    `Market ${r.marketId.slice(0, 18)}… · delivery slot ${fmt.slot(r.timeSlot)} · ${r.numTrades} trade objects`;
 
-  if (res.status === "no_trade") {
-    sub.textContent = "";
-    body.innerHTML = `<div class="notice warn"><b>No trade.</b> ${esc(res.message || "")}
-      (supply ${(+res.total_supply_kwh).toFixed(2)} kWh, demand ${(+res.total_demand_kwh).toFixed(2)} kWh)
-      — all open orders were marked <i>Expired</i>.</div>`;
-    $("#panel-execution").classList.add("hidden");
-    panel.scrollIntoView({ behavior: "smooth", block: "start" });
-    return;
-  }
-
-  const sp = res.sigmoid_params || {};
-  const chartCfg = { kUpper: sp.k_upper, kLower: sp.k_lower,
-                     theta: sp.theta, steepness: sp.steepness };
-  const simulated = (res.blockchain_mode || "mock") !== "live";
-  const note = res.status === "already_cleared"
+  const note = r.alreadyCleared
     ? `<div class="notice info">This market slot was already cleared — showing the stored result (idempotent re-trigger).</div>` : "";
+  const anchor = `
+        <div class="tablecap" style="margin-top:18px">On-chain anchor
+          <span class="badge ${r.simulated ? "mock" : "live"}">${r.simulated ? "simulated" : "on-chain"}</span></div>
+        <div class="txhash">clearMarket tx: ${esc(r.txHash || "—")}</div>`;
+  const limited = r.roundType === "DEMAND_LIMITED" ? "demand-limited (sellers rationed)"
+    : r.roundType === "SUPPLY_LIMITED" ? "supply-limited (buyers rationed)" : "balanced";
+  const tradesJson = `
+    <details class="json">
+      <summary>Trade objects as written to the off-chain DB (${r.numTrades}) — blake2b-256 ids, JSON</summary>
+      <pre>${esc(JSON.stringify(r.trades, null, 2))}</pre>
+    </details>`;
 
-  sub.textContent = `Market ${res.market_id.slice(0, 18)}… · delivery slot ${fmt.slot(res.time_slot)} · ${res.num_trades} trade objects`;
-  body.innerHTML = `
+  $("#results-body").innerHTML = `
     ${note}
     <div class="grid2-wide">
       <div>
         <div class="price-hero">
-          <div class="amount">${(+res.clearing_price_ct_per_kwh).toFixed(2)}<small> ct/kWh</small></div>
-          <div class="caption">uniform clearing price · ratio ${fmt.ratio(res.ratio)} · ${roundBadge(res.round_type)}</div>
+          <div class="amount">${r.clearing.toFixed(2)}<small> ct/kWh</small></div>
+          <div class="caption">uniform clearing price · ratio ${fmt.ratio(r.ratio)} · ${roundBadge(r.roundType)}</div>
         </div>
         <div class="statgrid">
-          <div class="stat supply"><div class="k">Supply</div><div class="v">${(+res.total_supply_kwh).toFixed(2)} <small>kWh</small></div></div>
-          <div class="stat demand"><div class="k">Demand</div><div class="v">${(+res.total_demand_kwh).toFixed(2)} <small>kWh</small></div></div>
-          <div class="stat"><div class="k">Traded</div><div class="v">${(+res.traded_quantity_kwh).toFixed(2)} <small>kWh</small></div></div>
+          <div class="stat supply"><div class="k">Supply</div><div class="v">${r.supply.toFixed(2)} <small>kWh</small></div></div>
+          <div class="stat demand"><div class="k">Demand</div><div class="v">${r.demand.toFixed(2)} <small>kWh</small></div></div>
+          <div class="stat"><div class="k">Traded</div><div class="v">${r.traded.toFixed(2)} <small>kWh</small></div></div>
         </div>
-        ${supplyDemandBars(res.total_supply_kwh, res.total_demand_kwh, res.traded_quantity_kwh)}
-        <div class="tablecap" style="margin-top:18px">On-chain anchor
-          <span class="badge ${simulated ? "mock" : "live"}">${simulated ? "simulated" : "on-chain"}</span></div>
-        <div class="txhash">clearMarket tx: ${esc(res.tx_hash || "—")}</div>
+        ${supplyDemandBars(r.supply, r.demand, r.traded)}
+        ${anchor}
       </div>
       <div>
-        <div class="chart-wrap">${sigmoidChartSVG(chartCfg, { ratio: res.ratio, price: res.clearing_price_ct_per_kwh })}</div>
+        <div class="chart-wrap">${sigmoidChartSVG(r.chartCfg, { ratio: r.ratio, price: r.clearing })}</div>
         <div class="chart-note">Clearing price = intersection of the sigmoid with the realized supply/demand ratio.</div>
       </div>
     </div>
-    <div class="grid2">
-      <div>
-        <div class="tablecap"><span class="swatch supply"></span>Producers</div>
-        ${allocationTable(res.allocations.producers, "producer")}
-      </div>
-      <div>
-        <div class="tablecap"><span class="swatch demand"></span>Consumers</div>
-        ${allocationTable(res.allocations.consumers, "consumer")}
-      </div>
+    <div class="notice info">Market is <b>${limited}</b>. Traded quantity = min(supply, demand) = ${r.traded.toFixed(2)} kWh. Every participant settles against the community pool at the uniform clearing price.</div>
+    <div class="tablecap" style="margin-top:16px">Energy distribution flow</div>
+    ${flowDiagram(r)}
+    <div class="tablecap" style="margin-top:18px"><span class="swatch supply"></span>Producers — allocation &amp; revenue</div>
+    ${producersTable(r)}
+    <div class="tablecap" style="margin-top:18px"><span class="swatch demand"></span>Consumers — allocation &amp; cost</div>
+    ${consumersTable(r)}
+    <div class="tablecap" style="margin-top:18px">Preferred trading-partner matches</div>
+    ${preferredMatchesHtml(r)}
+    <div class="tablecap" style="margin-top:18px">Energy-type economics (ex-post multipliers)</div>
+    <div class="statgrid">
+      <div class="stat"><div class="k">Grey levy collected</div><div class="v">${fmt.eur(r.levyCollected)}</div></div>
+      <div class="stat supply"><div class="k">Green bonus paid</div><div class="v">${fmt.eur(r.bonusPaid)}</div></div>
+      <div class="stat"><div class="k">Effective grey levy</div><div class="v">${(r.greyLevyEff * 100).toFixed(1)}<small>%</small></div></div>
     </div>
-    <details class="json">
-      <summary>Trade objects as written to the off-chain DB (${res.num_trades}) — blake2b-256 ids, JSON</summary>
-      <pre>${esc(JSON.stringify(res.trades, null, 2))}</pre>
-    </details>`;
+    ${scalingNoticeHtml(r)}
+    <p class="balance-summary">Buyers pay <b>${fmt.eur(r.buyersPay)}</b> · Sellers receive <b>${fmt.eur(r.sellersReceive)}</b> · Pool levy surplus <b>${fmt.eur(r.poolSurplus)}</b></p>
+    ${tradesJson}`;
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderNoTrade(msgHtml) {
+  const panel = $("#panel-results");
+  panel.classList.remove("hidden");
+  $("#results-sub").textContent = "";
+  $("#results-body").innerHTML = `<div class="notice warn">${msgHtml}</div>`;
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// Normalize a /trigger-clearing response to the unified result shape.
+// Energy types and configured preferred pairs are not part of the backend
+// response (Phase-2 stub) — both are looked up from the current UI state.
+function backendResult(res) {
+  const typeByName = {};
+  for (const p of state.producers) typeByName[p.name] = p.type === "grey" ? "grey" : "green";
+  const consById = new Map(state.consumers.map((c) => [c.id, c]));
+  const mutualPairs = state.producers
+    .filter((p) => p.partner && (consById.get(p.partner) || {}).partner === p.id)
+    .map((p) => `${p.name} ↔ ${consById.get(p.partner).name}`);
+  const sp = res.sigmoid_params || {};
+  return applyMultipliers({
+    producers: res.allocations.producers.map((a) => ({
+      name: a.name, type: typeByName[a.name] || "green",
+      requested: +a.requested_kwh, allocated: +a.allocated_kwh })),
+    consumers: res.allocations.consumers.map((a) => ({
+      name: a.name, requested: +a.requested_kwh, allocated: +a.allocated_kwh })),
+    supply: +res.total_supply_kwh, demand: +res.total_demand_kwh,
+    traded: +res.traded_quantity_kwh, ratio: +res.ratio,
+    clearing: +res.clearing_price_ct_per_kwh, roundType: res.round_type,
+    chartCfg: { kUpper: sp.k_upper, kLower: sp.k_lower,
+                theta: sp.theta, steepness: sp.steepness },
+    mutualPairs,
+    marketId: res.market_id, timeSlot: res.time_slot, numTrades: res.num_trades,
+    txHash: res.tx_hash, simulated: (res.blockchain_mode || "mock") !== "live",
+    alreadyCleared: res.status === "already_cleared", trades: res.trades,
+  });
+}
+
+function renderBackendResults(res) {
+  if (res.status === "no_trade") {
+    renderNoTrade(`<b>No trade.</b> ${esc(res.message || "")}
+      (supply ${(+res.total_supply_kwh).toFixed(2)} kWh, demand ${(+res.total_demand_kwh).toFixed(2)} kWh)
+      — all open orders were marked <i>Expired</i>.`);
+    return;
+  }
+  renderClearingResults(backendResult(res));
 }
 
 // -------------------------------------------------- panel E: post-delivery
@@ -632,16 +700,13 @@ function renderPenalties(res) {
     ${counterfactualChart(res)}`;
 }
 
-// ------------------- panel C: preferences & energy-type multipliers (sim)
+// ------------------- panel C: preferences & energy-type multipliers
 //
-// Client-side simulation of the Phase-2 allocation rules (Guide §4.4 step 6 /
-// §6) that the backend leaves as a documented stub until the GSY DEX
-// preferences API exists:
-//   1. mutual preferred partners are matched first at the clearing price,
-//   2. the residual is split pro-rata,
-//   3. energy-type multipliers adjust the per-trade price ex-post, with
-//      dynamic subsidy scaling so the green bonus stays funded by grey levy.
-// Runs entirely in the browser; it does not touch the off-chain DB or nodes.
+// The backend leaves the Phase-2 preference rules (Guide §4.4 step 6 / §6)
+// as a documented stub until the GSY DEX preferences API exists. Of those
+// rules, the energy-type multipliers are applied here ex-post to the
+// backend clearing results, with dynamic subsidy scaling so the green
+// bonus stays funded by grey levy revenue.
 
 function readMultiplierInputs() {
   state.multipliers = {
@@ -652,87 +717,32 @@ function readMultiplierInputs() {
   return state.multipliers;
 }
 
-function computePreferenceClearing() {
-  readConfigInputs();
+// Energy-type multipliers (ex-post) + dynamic subsidy scaling: prices are
+// adjusted after allocation, on top of the backend's pro-rata allocations
+// and uniform clearing price.
+function applyMultipliers(r) {
   const m = readMultiplierInputs();
-  const producers = state.producers
-    .filter((p) => p.name.trim() && p.energy > 0)
-    .map((p) => ({ ...p, type: p.type === "grey" ? "grey" : "green" }));
-  const consumers = state.consumers.filter((c) => c.name.trim() && c.energy > 0);
-
-  const supply = producers.reduce((s, p) => s + p.energy, 0);
-  const demand = consumers.reduce((s, c) => s + c.energy, 0);
-  if (supply <= 0 || demand <= 0) return { producers, consumers, supply, demand, noTrade: true };
-
-  const ratio = supply / demand;
-  const clearing = sigmoidPrice(ratio, state.config);
-  const traded = Math.min(supply, demand);
-  const roundType = supply < demand ? "SUPPLY_LIMITED"
-    : supply > demand ? "DEMAND_LIMITED" : "BALANCED";
-
-  // --- step 1: mutual preferred pairs (each participant in at most one) ----
-  const usedP = new Set(), usedC = new Set();
-  const pairs = [];
-  for (const p of producers) {
-    if (!p.partner || usedP.has(p.id)) continue;
-    const c = consumers.find((x) => x.id === p.partner);
-    if (c && c.partner === p.id && !usedC.has(c.id)) {
-      pairs.push({ producer: p, consumer: c, volume: Math.min(p.energy, c.energy) });
-      usedP.add(p.id); usedC.add(c.id);
-    }
-  }
-  let matched = pairs.reduce((s, pr) => s + pr.volume, 0);
-  if (matched > traded) {                     // safety: never exceed traded qty
-    const k = traded / matched;
-    pairs.forEach((pr) => { pr.volume *= k; });
-    matched = traded;
-  }
-  const matchedP = new Map(), matchedC = new Map();
-  pairs.forEach((pr) => {
-    matchedP.set(pr.producer.id, pr.volume);
-    matchedC.set(pr.consumer.id, pr.volume);
-  });
-
-  // --- step 2: pro-rata on the residual -----------------------------------
-  const residual = traded - matched;
-  const remSupply = supply - matched, remDemand = demand - matched;
-  const pAlloc = new Map(), cAlloc = new Map();
-  for (const p of producers) {
-    const mv = matchedP.get(p.id) || 0;
-    pAlloc.set(p.id, mv + (remSupply > 0 ? (p.energy - mv) * (residual / remSupply) : 0));
-  }
-  for (const c of consumers) {
-    const mv = matchedC.get(c.id) || 0;
-    cAlloc.set(c.id, mv + (remDemand > 0 ? (c.energy - mv) * (residual / remDemand) : 0));
-  }
-
-  // --- step 3: energy-type multipliers (ex-post) + dynamic subsidy scaling -
   const greyLevyEff = Math.min(m.greyLevy, m.levyCap);
   let greenAlloc = 0, greyAlloc = 0;
-  for (const p of producers) {
-    if (p.type === "grey") greyAlloc += pAlloc.get(p.id);
-    else greenAlloc += pAlloc.get(p.id);
+  for (const p of r.producers) {
+    if (p.type === "grey") greyAlloc += p.allocated;
+    else greenAlloc += p.allocated;
   }
-  const levyCollected = greyAlloc * clearing * greyLevyEff;          // ct
-  const bonusRequested = greenAlloc * clearing * m.greenMultiplier;  // ct
+  const levyCollected = greyAlloc * r.clearing * greyLevyEff;          // ct
+  const bonusRequested = greenAlloc * r.clearing * m.greenMultiplier;  // ct
   // green bonuses are funded by grey levy revenue; scale down if insufficient
   const scale = bonusRequested > 1e-9 ? Math.min(1, levyCollected / bonusRequested) : 1;
   const effGreen = m.greenMultiplier * scale;
-  const greenFinal = clearing * (1 + effGreen);
-  const greyFinal = clearing * (1 - greyLevyEff);
+  const greenFinal = r.clearing * (1 + effGreen);
+  const greyFinal = r.clearing * (1 - greyLevyEff);
   const bonusPaid = scale * bonusRequested;
-
-  const buyersPay = traded * clearing;
+  const buyersPay = r.traded * r.clearing;
   const sellersReceive = greenAlloc * greenFinal + greyAlloc * greyFinal;
-
-  return {
-    producers, consumers, supply, demand, ratio, clearing, traded, roundType,
-    pairs, matched, pAlloc, cAlloc, m, greyLevyEff, greenAlloc, greyAlloc,
-    levyCollected, bonusRequested, bonusPaid, scale, effGreen,
-    greenFinal, greyFinal, buyersPay, sellersReceive,
-    poolSurplus: buyersPay - sellersReceive,
-    finalPrice: (p) => (p.type === "grey" ? greyFinal : greenFinal),
-  };
+  return Object.assign(r, {
+    m, greyLevyEff, greenAlloc, greyAlloc, levyCollected, bonusRequested,
+    bonusPaid, scale, effGreen, greenFinal, greyFinal, buyersPay,
+    sellersReceive, poolSurplus: buyersPay - sellersReceive,
+  });
 }
 
 function trunc(s, n) { s = String(s); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
@@ -751,7 +761,7 @@ function flowDiagram(r) {
   const leftX = 24, rightX = W - 24 - boxW;
   const poolX = (W - poolW) / 2, poolY = (H - poolH) / 2, centerY = H / 2;
   const maxA = Math.max(0.001,
-    ...P.map((p) => r.pAlloc.get(p.id) || 0), ...C.map((c) => r.cAlloc.get(c.id) || 0));
+    ...P.map((p) => p.allocated || 0), ...C.map((c) => c.allocated || 0));
   const ys = (count) => {
     if (count <= 1) return [(H - boxH) / 2];
     const usable = H - padTop * 2 - boxH;
@@ -762,7 +772,7 @@ function flowDiagram(r) {
   let bands = "", boxes = "";
 
   P.forEach((p, i) => {
-    const a = r.pAlloc.get(p.id) || 0;
+    const a = p.allocated || 0;
     const y0 = pys[i] + boxH / 2, x0 = leftX + boxW;
     const y1 = poolY + poolH * (i + 0.5) / P.length, x1 = poolX;
     const stroke = p.type === "grey" ? "#9ca3af" : "#34a877";
@@ -775,7 +785,7 @@ function flowDiagram(r) {
       + `<text x="${leftX + 14}" y="${pys[i] + 42}" font-size="12" fill="${ink}" opacity="0.85">${a.toFixed(2)} kWh · ${p.type}</text></g>`;
   });
   C.forEach((c, i) => {
-    const a = r.cAlloc.get(c.id) || 0;
+    const a = c.allocated || 0;
     const y0 = cys[i] + boxH / 2, x0 = rightX;
     const y1 = poolY + poolH * (i + 0.5) / C.length, x1 = poolX + poolW;
     bands += `<path d="M${x1},${y1} C${(x0 + x1) / 2},${y1} ${(x0 + x1) / 2},${y0} ${x0},${y0}" fill="none" stroke="#3b82c4" stroke-width="${bandW(a)}" stroke-opacity="0.5"/>`;
@@ -789,83 +799,27 @@ function flowDiagram(r) {
   return `<div class="flow-wrap"><svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" width="100%" font-family="Segoe UI, sans-serif">${bands}${pool}${boxes}</svg></div>`;
 }
 
-function renderDistribution(r) {
-  const trades = r.producers.length + r.consumers.length;
-  const limited = r.roundType === "DEMAND_LIMITED" ? "demand-limited (sellers rationed)"
-    : r.roundType === "SUPPLY_LIMITED" ? "supply-limited (buyers rationed)" : "balanced";
+// ---------------------------------------------------------- dev auto-reload
 
-  const prodRows = r.producers.map((p) => {
-    const a = r.pAlloc.get(p.id) || 0, fin = r.finalPrice(p);
-    return `<tr>
-      <td>${esc(p.name)}</td>
-      <td><span class="badge ${p.type}">${p.type}</span></td>
-      <td class="num">${p.energy.toFixed(2)}</td>
-      <td class="num">${a.toFixed(3)}</td>
-      <td>${fillCell(p.energy > 0 ? a / p.energy : 0, "supply")}</td>
-      <td class="num">${fin.toFixed(2)}</td>
-      <td class="num">${fmt.eur(a * fin)}</td></tr>`;
-  }).join("");
-
-  const consRows = r.consumers.map((c) => {
-    const a = r.cAlloc.get(c.id) || 0;
-    return `<tr>
-      <td>${esc(c.name)}</td>
-      <td class="num">${c.energy.toFixed(2)}</td>
-      <td class="num">${a.toFixed(3)}</td>
-      <td>${fillCell(c.energy > 0 ? a / c.energy : 0, "demand")}</td>
-      <td class="num">${r.clearing.toFixed(2)}</td>
-      <td class="num">${fmt.eur(a * r.clearing)}</td></tr>`;
-  }).join("");
-
-  const prefHtml = r.pairs.length
-    ? r.pairs.map((pr) => `<div class="cf-block"><div class="cf-title">${esc(pr.producer.name)} ↔ ${esc(pr.consumer.name)} <small>— ${pr.volume.toFixed(2)} kWh matched at the clearing price (priority before pro-rata)</small></div></div>`).join("")
-    : `<div class="notice info">No mutual preferred pairs found — full volume allocated pro-rata. (A match requires both sides to select each other as preferred partner.)</div>`;
-
-  let scalingNotice = "";
-  if (r.greenAlloc > 0 && r.scale < 1 - 1e-9) {
-    scalingNotice = `<div class="notice warn">Grey levy revenue (${fmt.eur(r.levyCollected)}) does not fully cover the requested green bonus (${fmt.eur(r.bonusRequested)}). Dynamic subsidy scaling applied: green bonus reduced to ${(r.scale * 100).toFixed(0)}% so it stays self-funded.</div>`;
-  } else if (r.greenAlloc > 0 && r.greyAlloc > 0) {
-    scalingNotice = `<div class="notice info">Grey levy revenue (${fmt.eur(r.levyCollected)}) fully funds the green bonus (${fmt.eur(r.bonusPaid)}); the remainder is a pool levy surplus.</div>`;
-  }
-
-  $("#dist-body").innerHTML = `
-    <div class="statgrid">
-      <div class="stat price"><div class="k">Clearing price</div><div class="v">${r.clearing.toFixed(2)} <small>ct/kWh</small></div></div>
-      <div class="stat"><div class="k">Traded quantity</div><div class="v">${r.traded.toFixed(2)} <small>kWh</small></div></div>
-      <div class="stat"><div class="k">Trades generated</div><div class="v">${trades} <small>via pool</small></div></div>
-      <div class="stat price"><div class="k">Preferred-matched</div><div class="v">${r.matched.toFixed(2)} <small>kWh</small></div></div>
-    </div>
-    <div class="notice info">Market is <b>${limited}</b>. Traded quantity = min(supply, demand) = ${r.traded.toFixed(2)} kWh. Every participant settles against the community pool at the uniform clearing price.</div>
-    <div class="tablecap" style="margin-top:16px">Energy distribution flow</div>
-    ${flowDiagram(r)}
-    <div class="tablecap" style="margin-top:18px"><span class="swatch supply"></span>Producers — allocation &amp; revenue</div>
-    <table class="data"><thead><tr><th>Producer</th><th>Type</th><th class="num">Offered</th><th class="num">Allocated</th><th>Fill</th><th class="num">Final ct/kWh</th><th class="num">Revenue</th></tr></thead><tbody>${prodRows}</tbody></table>
-    <div class="tablecap" style="margin-top:18px"><span class="swatch demand"></span>Consumers — allocation &amp; cost</div>
-    <table class="data"><thead><tr><th>Consumer</th><th class="num">Demanded</th><th class="num">Allocated</th><th>Fill</th><th class="num">ct/kWh</th><th class="num">Cost</th></tr></thead><tbody>${consRows}</tbody></table>
-    <div class="tablecap" style="margin-top:18px">Preferred trading-partner matches</div>
-    ${prefHtml}
-    <div class="tablecap" style="margin-top:18px">Energy-type economics (ex-post multipliers)</div>
-    <div class="statgrid">
-      <div class="stat"><div class="k">Grey levy collected</div><div class="v">${fmt.eur(r.levyCollected)}</div></div>
-      <div class="stat supply"><div class="k">Green bonus paid</div><div class="v">${fmt.eur(r.bonusPaid)}</div></div>
-      <div class="stat"><div class="k">Effective grey levy</div><div class="v">${(r.greyLevyEff * 100).toFixed(1)}<small>%</small></div></div>
-    </div>
-    ${scalingNotice}
-    <p class="balance-summary">Buyers pay <b>${fmt.eur(r.buyersPay)}</b> · Sellers receive <b>${fmt.eur(r.sellersReceive)}</b> · Pool levy surplus <b>${fmt.eur(r.poolSurplus)}</b></p>`;
-}
-
-function runPreferenceSimulation() {
-  const panel = $("#panel-dist");
-  panel.classList.remove("hidden");
-  const r = computePreferenceClearing();
-  if (r.noTrade) {
-    $("#dist-body").innerHTML = `<div class="notice warn"><b>No trade.</b> Supply or demand is zero (supply ${r.supply.toFixed(2)} kWh, demand ${r.demand.toFixed(2)} kWh) — add at least one producer and one consumer.</div>`;
-    $("#pref-status").textContent = "no trade";
-  } else {
-    renderDistribution(r);
-    $("#pref-status").textContent = `done — ${r.clearing.toFixed(2)} ct/kWh, ${r.traded.toFixed(2)} kWh traded`;
-  }
-  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+// scripts/serve_ui.py exposes /__version (latest mtime of the ui/ files).
+// Poll it and reload as soon as it changes, so an open tab can never keep
+// showing stale code. Other servers (e.g. the nginx Docker image) don't
+// have the endpoint — the watcher then disables itself. While the dev
+// server is down the poll just fails silently and resumes on restart, so
+// a stale tab also self-heals once the stack is started again.
+function startDevReload() {
+  if (!/^https?:$/.test(location.protocol)) return;
+  let current = null;
+  const timer = setInterval(async () => {
+    let resp;
+    try {
+      resp = await fetch("__version", { cache: "no-store" });
+    } catch { return; }                              // server down — retry later
+    if (!resp.ok) { clearInterval(timer); return; }  // not the dev server
+    const stamp = await resp.text();
+    if (current === null) current = stamp;
+    else if (stamp !== current) location.reload();
+  }, 3000);
 }
 
 // ------------------------------------------------------------ service pings
@@ -921,10 +875,10 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById(id).addEventListener("input", readMultiplierInputs);
   }
 
-  $("#run-preferences").addEventListener("click", runPreferenceSimulation);
   $("#run-clearing").addEventListener("click", runClearing);
   $("#run-execution").addEventListener("click", runExecution);
 
   pingServices();
   setInterval(pingServices, 20000);
+  startDevReload();
 });

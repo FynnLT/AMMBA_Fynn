@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AMMBA Market Simulator</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
-<link rel="stylesheet" href="styles.css">
+<!-- bump ?v= when styles.css/app.js change: the static servers send no
+     Cache-Control headers, so browsers may otherwise reuse a stale copy -->
+<link rel="stylesheet" href="styles.css?v=2">
 </head>
 <body>
 
@@ -99,32 +101,21 @@
     <div class="notice info">
       <b>Green:</b> final = clearing × (1 + green_multiplier) &nbsp;·&nbsp; <b>Grey:</b> final = clearing × (1 − min(grey_levy, levy_cap)) &nbsp;·&nbsp; green bonuses are funded by grey levy revenue; if revenue is insufficient the bonus is scaled down (dynamic subsidy scaling).
     </div>
-    <button class="primary" id="run-preferences" style="margin-top:14px">
-      <span class="spinner"></span>▶ Execute
-    </button>
-    <span class="run-status" id="pref-status"></span>
   </section>
 
-  <!-- Clearing Results (preference-aware simulation, computed in-browser) -->
-  <section class="card hidden" id="panel-dist">
-    <h2><span class="step-no ok">✓</span> Clearing Results <small style="font-weight:400;color:var(--muted)">— preference-aware simulation (in-browser)</small></h2>
-    <p class="sub">Outcome of the batch auction for this delivery slot.</p>
-    <div id="dist-body"></div>
-  </section>
-
-  <!-- Run clearing (real backend round-trip) -->
+  <!-- D: Run clearing (real backend round-trip) -->
   <section class="card" id="panel-run">
-    <h2><span class="step-no">⚙</span> Run Clearing <small style="font-weight:400;color:var(--muted)">— backend round-trip</small></h2>
-    <p class="sub">Creates the market and orders in the off-chain DB, then triggers the Clearing Node — exactly the calls the Market Orchestrator would make. Uniform-price pro-rata clearing (without the Phase-2 preferences above, which the backend still stubs).</p>
+    <h2><span class="step-no">D</span> Run Clearing <small style="font-weight:400;color:var(--muted)">— backend round-trip</small></h2>
+    <p class="sub">Creates the market and orders in the off-chain DB, then triggers the Clearing Node — exactly the calls the Market Orchestrator would make. Uniform-price pro-rata clearing; the backend still stubs the Phase-2 preferences, so the energy-type multipliers from C are overlaid on the results ex-post in-browser.</p>
     <button class="primary" id="run-clearing">
       <span class="spinner"></span>▶ Run Clearing
     </button>
     <span class="run-status" id="run-status"></span>
   </section>
 
-  <!-- D: Results -->
+  <!-- Clearing Results (rendered after ▶ Run Clearing) -->
   <section class="card hidden" id="panel-results">
-    <h2><span class="step-no">D</span> Clearing Results <small style="font-weight:400;color:var(--muted)">— backend round-trip</small></h2>
+    <h2><span class="step-no ok">✓</span> Clearing Results <small style="font-weight:400;color:var(--muted)">— backend round-trip</small></h2>
     <p class="sub" id="results-sub"></p>
     <div id="results-body"></div>
   </section>
@@ -148,6 +139,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="app.js"></script>
+<script src="app.js?v=4"></script>
 </body>
 </html>

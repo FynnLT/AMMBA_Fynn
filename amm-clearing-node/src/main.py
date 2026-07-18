@@ -14,8 +14,9 @@ deployment would return 202 Accepted and process in a background task.
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from src.clearing import run_clearing
@@ -71,6 +72,18 @@ def create_app(cfg: Config | None = None,
     app.add_middleware(CORSMiddleware, allow_origins=["*"],
                        allow_methods=["*"], allow_headers=["*"])
 
+    # Upstream failures map to 502. On a contract failure no trades were
+    # written; the orchestrator may re-trigger (guide §4.7).
+    @app.exception_handler(OffchainDBError)
+    async def offchain_db_error(_request: Request, exc: OffchainDBError):
+        logger.error("off-chain DB failure: %s", exc)
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+    @app.exception_handler(ContractError)
+    async def contract_error(_request: Request, exc: ContractError):
+        logger.error("contract failure: %s", exc)
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
+
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok", "service": "amm-clearing-node",
@@ -83,16 +96,7 @@ def create_app(cfg: Config | None = None,
             payload["sigmoid_params"] = {
                 k: v for k, v in payload["sigmoid_params"].items()
                 if v is not None}
-        try:
-            return await run_clearing(payload, cfg, db, chain)
-        except OffchainDBError as exc:
-            logger.error("off-chain DB failure: %s", exc)
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        except ContractError as exc:
-            # On-chain failure: no trades were written; the orchestrator may
-            # re-trigger (guide §4.7).
-            logger.error("contract failure: %s", exc)
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return await run_clearing(payload, cfg, db, chain)
 
     return app
 

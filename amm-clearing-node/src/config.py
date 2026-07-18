@@ -18,6 +18,18 @@ logger = logging.getLogger("amm-clearing-node.config")
 
 DEFAULT_CONFIG_FILE = Path(__file__).resolve().parent.parent / "configuration.yaml"
 
+# Environment variables always win (guide §4.3): env var -> (Config field, cast)
+_ENV_OVERRIDES = {
+    "OFFCHAIN_DB_URL": ("offchain_db_url", str),
+    "RPC_URL": ("rpc_url", str),
+    "CONTRACT_ADDRESS": ("contract_address", str),
+    "CLEARING_NODE_PRIVATE_KEY": ("private_key", str),
+    "TIME_SLOT_SEC": ("time_slot_sec", int),
+    "BLOCKCHAIN_MODE": ("blockchain_mode", str.lower),
+    "HOST": ("host", str),
+    "PORT": ("port", int),
+}
+
 
 @dataclass(frozen=True)
 class CommunityParams:
@@ -87,25 +99,10 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         default_community=_community_from_yaml(raw.get("default_community") or {}),
     )
 
-    # Environment variables always win (guide §4.3).
     env = os.environ
-    overrides: dict = {}
-    if env.get("OFFCHAIN_DB_URL"):
-        overrides["offchain_db_url"] = env["OFFCHAIN_DB_URL"]
-    if env.get("RPC_URL"):
-        overrides["rpc_url"] = env["RPC_URL"]
-    if env.get("CONTRACT_ADDRESS"):
-        overrides["contract_address"] = env["CONTRACT_ADDRESS"]
-    if env.get("CLEARING_NODE_PRIVATE_KEY"):
-        overrides["private_key"] = env["CLEARING_NODE_PRIVATE_KEY"]
-    if env.get("TIME_SLOT_SEC"):
-        overrides["time_slot_sec"] = int(env["TIME_SLOT_SEC"])
-    if env.get("BLOCKCHAIN_MODE"):
-        overrides["blockchain_mode"] = env["BLOCKCHAIN_MODE"].lower()
-    if env.get("HOST"):
-        overrides["host"] = env["HOST"]
-    if env.get("PORT"):
-        overrides["port"] = int(env["PORT"])
+    overrides = {field: cast(env[name])
+                 for name, (field, cast) in _ENV_OVERRIDES.items()
+                 if env.get(name)}
     if overrides:
         cfg = replace(cfg, **overrides)
     return cfg

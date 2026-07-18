@@ -571,7 +571,7 @@ function backendResult(res) {
     marketId: res.market_id, timeSlot: res.time_slot, numTrades: res.num_trades,
     txHash: res.tx_hash, simulated: (res.blockchain_mode || "mock") !== "live",
     alreadyCleared: res.status === "already_cleared", trades: res.trades,
-  });
+  }, readMultiplierInputs());
 }
 
 function renderBackendResults(res) {
@@ -719,9 +719,9 @@ function readMultiplierInputs() {
 
 // Energy-type multipliers (ex-post) + dynamic subsidy scaling: prices are
 // adjusted after allocation, on top of the backend's pro-rata allocations
-// and uniform clearing price.
-function applyMultipliers(r) {
-  const m = readMultiplierInputs();
+// and uniform clearing price. Pure w.r.t. the DOM: `m` is passed in so the
+// economics are computable (and testable) without rendered inputs.
+function applyMultipliers(r, m) {
   const greyLevyEff = Math.min(m.greyLevy, m.levyCap);
   let greenAlloc = 0, greyAlloc = 0;
   for (const p of r.producers) {

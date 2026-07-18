@@ -32,6 +32,10 @@ logger = logging.getLogger("mock-offchain-db")
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
+# Guide §2 order lifecycle.
+VALID_ORDER_STATUSES = ("Open", "Executed", "Expired", "Deleted")
+VALID_ORDER_TYPES = ("Bid", "Offer")
+
 
 def _as_list(payload: Union[list, dict]) -> list[dict]:
     return payload if isinstance(payload, list) else [payload]
@@ -110,7 +114,7 @@ def create_app(store: InMemoryStore | None = None) -> FastAPI:
         orders = _as_list(payload)
         created = []
         for order in orders:
-            if order.get("order_type") not in ("Bid", "Offer"):
+            if order.get("order_type") not in VALID_ORDER_TYPES:
                 raise HTTPException(
                     status_code=400,
                     detail="order_type must be 'Bid' or 'Offer'")
@@ -135,7 +139,7 @@ def create_app(store: InMemoryStore | None = None) -> FastAPI:
             raise HTTPException(status_code=404,
                                 detail=f"order {order_id} not found")
         if "status" in patch:
-            if patch["status"] not in ("Open", "Executed", "Expired", "Deleted"):
+            if patch["status"] not in VALID_ORDER_STATUSES:
                 raise HTTPException(status_code=400,
                                     detail=f"invalid status {patch['status']!r}")
             order["status"] = patch["status"]

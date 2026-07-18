@@ -37,6 +37,20 @@ def _to_bool(value: str) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+# Environment variables always win (guide §4.3): env var -> (Config field, cast)
+_ENV_OVERRIDES = {
+    "OFFCHAIN_DB_URL": ("offchain_db_url", str),
+    "TIME_SLOT_SEC": ("time_slot_sec", int),
+    "EXECUTION_OFFSET_MIN": ("execution_offset_min", int),
+    "POLLING_INTERVAL_SEC": ("polling_interval_sec", int),
+    "POLLING_ENABLED": ("polling_enabled", _to_bool),
+    "PENALTY_GAMMA": ("penalty_gamma", float),
+    "PENALTY_TOLERANCE_KWH": ("penalty_eta_kwh", float),
+    "HOST": ("host", str),
+    "PORT": ("port", int),
+}
+
+
 def load_config(path: str | os.PathLike | None = None) -> Config:
     path = Path(os.environ.get("CONFIG_FILE", path or DEFAULT_CONFIG_FILE))
     raw: dict = {}
@@ -63,25 +77,9 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     )
 
     env = os.environ
-    overrides: dict = {}
-    if env.get("OFFCHAIN_DB_URL"):
-        overrides["offchain_db_url"] = env["OFFCHAIN_DB_URL"]
-    if env.get("TIME_SLOT_SEC"):
-        overrides["time_slot_sec"] = int(env["TIME_SLOT_SEC"])
-    if env.get("EXECUTION_OFFSET_MIN"):
-        overrides["execution_offset_min"] = int(env["EXECUTION_OFFSET_MIN"])
-    if env.get("POLLING_INTERVAL_SEC"):
-        overrides["polling_interval_sec"] = int(env["POLLING_INTERVAL_SEC"])
-    if env.get("POLLING_ENABLED"):
-        overrides["polling_enabled"] = _to_bool(env["POLLING_ENABLED"])
-    if env.get("PENALTY_GAMMA"):
-        overrides["penalty_gamma"] = float(env["PENALTY_GAMMA"])
-    if env.get("PENALTY_TOLERANCE_KWH"):
-        overrides["penalty_eta_kwh"] = float(env["PENALTY_TOLERANCE_KWH"])
-    if env.get("HOST"):
-        overrides["host"] = env["HOST"]
-    if env.get("PORT"):
-        overrides["port"] = int(env["PORT"])
+    overrides = {field: cast(env[name])
+                 for name, (field, cast) in _ENV_OVERRIDES.items()
+                 if env.get(name)}
     if overrides:
         cfg = replace(cfg, **overrides)
     return cfg

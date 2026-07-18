@@ -63,113 +63,87 @@ def _parameters(allocated: float, clearing_price: float, trade_uuid: str,
     }
 
 
-def build_buyer_trade(bid: dict, *, market_id: str, time_slot: int,
-                      clearing_price: float, tx_hash: str, pool_id: str,
-                      community, total_supply_kwh: float,
-                      total_demand_kwh: float) -> dict:
+def _component(area_uuid: str, market_id: str, time_slot: int,
+               creation_time: int, energy: float, energy_rate: float) -> dict:
+    return {
+        "area_uuid": area_uuid,
+        "market_id": market_id,
+        "time_slot": time_slot,
+        "creation_time": creation_time,
+        "energy": energy,
+        "energy_rate": energy_rate,
+    }
+
+
+def _build_trade(order: dict, *, order_side: str, market_id: str,
+                 time_slot: int, clearing_price: float, tx_hash: str,
+                 pool_id: str, community, total_supply_kwh: float,
+                 total_demand_kwh: float) -> dict:
+    """Build one trade between a participant's order and the pool.
+
+    `order_side` is the participant's side: "bid" (Trade A: buyer -> pool)
+    or "offer" (Trade B: pool -> seller). The pool always takes the opposite
+    side, anchored by the EVM tx hash instead of an order hash.
+    """
+    trade_uuid = str(uuid4())
+    now = int(time.time())
+    allocated = round(order["allocated_energy"], _ROUND)
+    price = round(clearing_price, _ROUND)
+
+    participant_component = _component(
+        order["area_uuid"], order["market_id"], order["time_slot"],
+        order["creation_time"], allocated, price)
+    pool_component = _component(
+        pool_id, market_id, time_slot, now, allocated, price)
+    residual = _residual(order["energy"], allocated, order["energy_rate"])
+
+    if order_side == "bid":
+        buyer, seller = order["created_by"], pool_id
+        bid = {"buyer": order["created_by"], "nonce": order.get("nonce", 1),
+               "bid_component": participant_component}
+        offer = {"seller": pool_id, "offer_component": pool_component}
+        # order_id IS the blake2b hash of the original order in GSY-DEX;
+        # the EVM contract tx hash anchors the pool side of the trade.
+        bid_hash, offer_hash = order["order_id"], tx_hash
+        residual_bid, residual_offer = residual, None
+    else:
+        buyer, seller = pool_id, order["created_by"]
+        offer = {"seller": order["created_by"],
+                 "offer_component": participant_component}
+        bid = {"buyer": pool_id, "nonce": 1, "bid_component": pool_component}
+        offer_hash, bid_hash = order["order_id"], tx_hash
+        residual_offer, residual_bid = residual, None
+
+    trade = {
+        "trade_uuid": trade_uuid,
+        "status": "Settled",
+        "buyer": buyer,
+        "seller": seller,
+        "market_id": market_id,
+        "time_slot": time_slot,
+        "creation_time": now,
+        "bid": bid,
+        "bid_hash": bid_hash,
+        "offer": offer,
+        "offer_hash": offer_hash,
+        "residual_bid": residual_bid,
+        "residual_offer": residual_offer,
+        "parameters": _parameters(allocated, price, trade_uuid, tx_hash,
+                                  community, pool_id, total_supply_kwh,
+                                  total_demand_kwh),
+    }
+    trade["_id"] = blake2b_hash(trade)
+    return trade
+
+
+def build_buyer_trade(bid: dict, **kwargs) -> dict:
     """Trade A: buyer -> pool."""
-    trade_uuid = str(uuid4())
-    now = int(time.time())
-    allocated = round(bid["allocated_energy"], _ROUND)
-    price = round(clearing_price, _ROUND)
-
-    trade = {
-        "trade_uuid": trade_uuid,
-        "status": "Settled",
-        "buyer": bid["created_by"],
-        "seller": pool_id,
-        "market_id": market_id,
-        "time_slot": time_slot,
-        "creation_time": now,
-        "bid": {
-            "buyer": bid["created_by"],
-            "nonce": bid.get("nonce", 1),
-            "bid_component": {
-                "area_uuid": bid["area_uuid"],
-                "market_id": bid["market_id"],
-                "time_slot": bid["time_slot"],
-                "creation_time": bid["creation_time"],
-                "energy": allocated,
-                "energy_rate": price,
-            },
-        },
-        # order_id IS the blake2b hash of the original order in GSY-DEX
-        "bid_hash": bid["order_id"],
-        "offer": {
-            "seller": pool_id,
-            "offer_component": {
-                "area_uuid": pool_id,
-                "market_id": market_id,
-                "time_slot": time_slot,
-                "creation_time": now,
-                "energy": allocated,
-                "energy_rate": price,
-            },
-        },
-        # EVM contract tx hash anchors the pool side of the trade
-        "offer_hash": tx_hash,
-        "residual_bid": _residual(bid["energy"], allocated, bid["energy_rate"]),
-        "residual_offer": None,
-        "parameters": _parameters(allocated, price, trade_uuid, tx_hash,
-                                  community, pool_id, total_supply_kwh,
-                                  total_demand_kwh),
-    }
-    trade["_id"] = blake2b_hash(trade)
-    return trade
+    return _build_trade(bid, order_side="bid", **kwargs)
 
 
-def build_seller_trade(offer: dict, *, market_id: str, time_slot: int,
-                       clearing_price: float, tx_hash: str, pool_id: str,
-                       community, total_supply_kwh: float,
-                       total_demand_kwh: float) -> dict:
+def build_seller_trade(offer: dict, **kwargs) -> dict:
     """Trade B: pool -> seller."""
-    trade_uuid = str(uuid4())
-    now = int(time.time())
-    allocated = round(offer["allocated_energy"], _ROUND)
-    price = round(clearing_price, _ROUND)
-
-    trade = {
-        "trade_uuid": trade_uuid,
-        "status": "Settled",
-        "buyer": pool_id,
-        "seller": offer["created_by"],
-        "market_id": market_id,
-        "time_slot": time_slot,
-        "creation_time": now,
-        "offer": {
-            "seller": offer["created_by"],
-            "offer_component": {
-                "area_uuid": offer["area_uuid"],
-                "market_id": offer["market_id"],
-                "time_slot": offer["time_slot"],
-                "creation_time": offer["creation_time"],
-                "energy": allocated,
-                "energy_rate": price,
-            },
-        },
-        "offer_hash": offer["order_id"],
-        "bid": {
-            "buyer": pool_id,
-            "nonce": 1,
-            "bid_component": {
-                "area_uuid": pool_id,
-                "market_id": market_id,
-                "time_slot": time_slot,
-                "creation_time": now,
-                "energy": allocated,
-                "energy_rate": price,
-            },
-        },
-        "bid_hash": tx_hash,
-        "residual_offer": _residual(offer["energy"], allocated,
-                                    offer["energy_rate"]),
-        "residual_bid": None,
-        "parameters": _parameters(allocated, price, trade_uuid, tx_hash,
-                                  community, pool_id, total_supply_kwh,
-                                  total_demand_kwh),
-    }
-    trade["_id"] = blake2b_hash(trade)
-    return trade
+    return _build_trade(offer, order_side="offer", **kwargs)
 
 
 def build_all_trades(bids: list[dict], offers: list[dict], *, market_id: str,

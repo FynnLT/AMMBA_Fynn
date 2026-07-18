@@ -23,11 +23,18 @@ SUPPLY_LIMITED = "SUPPLY_LIMITED"
 DEMAND_LIMITED = "DEMAND_LIMITED"
 BALANCED = "BALANCED"
 
+# Same tolerance as the Execution Node's determine_round_type: pro-rata
+# allocation introduces float noise, so exact comparison would misclassify
+# effectively balanced markets.
+_EPSILON = 1e-9
+
+_SIGMOID_PARAM_KEYS = ("k_upper", "k_lower", "theta", "steepness")
+
 
 def round_type(total_supply_kwh: float, total_demand_kwh: float) -> str:
-    if total_supply_kwh < total_demand_kwh:
+    if total_supply_kwh < total_demand_kwh - _EPSILON:
         return SUPPLY_LIMITED
-    if total_supply_kwh > total_demand_kwh:
+    if total_supply_kwh > total_demand_kwh + _EPSILON:
         return DEMAND_LIMITED
     return BALANCED
 
@@ -47,6 +54,35 @@ def _allocation_summary(orders: list[dict], clearing_price: float) -> list[dict]
             "value_ct": round(allocated * clearing_price, 4),
         })
     return summary
+
+
+def _clearing_summary(*, market_id: str, community_uuid: str, time_slot: int,
+                      clearing_price: float, total_supply_kwh: float,
+                      total_demand_kwh: float, sigmoid_params: dict,
+                      tx_hash: str | None, pool_id: str, producers: list[dict],
+                      consumers: list[dict], trades: list[dict],
+                      **extra) -> dict:
+    """Common shape of a clearing result (fresh run and idempotent re-trigger
+    build the same summary; `extra` carries the path-specific keys)."""
+    return {
+        "market_id": market_id,
+        "community_uuid": community_uuid,
+        "time_slot": time_slot,
+        "clearing_price_ct_per_kwh": clearing_price,
+        "ratio": (round(total_supply_kwh / total_demand_kwh, 6)
+                  if total_demand_kwh else None),
+        "total_supply_kwh": round(total_supply_kwh, 6),
+        "total_demand_kwh": round(total_demand_kwh, 6),
+        "traded_quantity_kwh": round(min(total_supply_kwh, total_demand_kwh), 6),
+        "round_type": round_type(total_supply_kwh, total_demand_kwh),
+        "sigmoid_params": sigmoid_params,
+        "tx_hash": tx_hash,
+        "pool_id": pool_id,
+        "allocations": {"producers": producers, "consumers": consumers},
+        "num_trades": len(trades),
+        "trades": trades,
+        **extra,
+    }
 
 
 def _summary_from_existing_trades(trades: list[dict], market_id: str,
@@ -79,29 +115,52 @@ def _summary_from_existing_trades(trades: list[dict], market_id: str,
                  if t.get("seller") == pool_id]
     producers = [entry(t, "offer", "seller") for t in trades
                  if t.get("buyer") == pool_id]
-    total_supply = params.get("total_supply_kwh", 0.0)
-    total_demand = params.get("total_demand_kwh", 0.0)
+    return _clearing_summary(
+        market_id=market_id, community_uuid=community_uuid,
+        time_slot=time_slot, clearing_price=clearing_price,
+        total_supply_kwh=params.get("total_supply_kwh", 0.0),
+        total_demand_kwh=params.get("total_demand_kwh", 0.0),
+        sigmoid_params={key: params.get(key) for key in _SIGMOID_PARAM_KEYS},
+        tx_hash=params.get("amm_tx_hash"), pool_id=pool_id,
+        producers=producers, consumers=consumers, trades=trades,
+        status="already_cleared",
+        message="trades already exist for this market_id + time_slot; "
+                "clearing is idempotent and was not re-run",
+    )
+
+
+async def _expire_one_sided_market(db: OffchainDBClient, open_orders: list[dict],
+                                   market_id: str, community_uuid: str,
+                                   time_slot: int, total_supply_kwh: float,
+                                   total_demand_kwh: float) -> dict:
+    """One-sided market: no trade for this slot, expire everything
+    (guide §4.4 step 2)."""
+    await asyncio.gather(*(db.update_order(o["order_id"], status="Expired")
+                           for o in open_orders))
+    logger.info("no trade for market %s (one side empty); %d orders expired",
+                market_id, len(open_orders))
     return {
-        "status": "already_cleared",
-        "message": "trades already exist for this market_id + time_slot; "
-                   "clearing is idempotent and was not re-run",
+        "status": "no_trade",
+        "message": "supply or demand is zero — all open orders expired",
         "market_id": market_id,
         "community_uuid": community_uuid,
         "time_slot": time_slot,
-        "clearing_price_ct_per_kwh": clearing_price,
-        "ratio": round(total_supply / total_demand, 6) if total_demand else None,
-        "total_supply_kwh": total_supply,
-        "total_demand_kwh": total_demand,
-        "traded_quantity_kwh": round(min(total_supply, total_demand), 6),
-        "round_type": round_type(total_supply, total_demand),
-        "sigmoid_params": {key: params.get(key) for key in
-                           ("k_upper", "k_lower", "theta", "steepness")},
-        "tx_hash": params.get("amm_tx_hash"),
-        "pool_id": pool_id,
-        "allocations": {"producers": producers, "consumers": consumers},
-        "num_trades": len(trades),
-        "trades": trades,
+        "total_supply_kwh": round(total_supply_kwh, 6),
+        "total_demand_kwh": round(total_demand_kwh, 6),
+        "num_orders_expired": len(open_orders),
+        "trades": [],
     }
+
+
+def _allocate_pro_rata(bids: list[dict], offers: list[dict],
+                       total_supply_kwh: float,
+                       total_demand_kwh: float) -> None:
+    """Traded quantity + per-order `allocated_energy` (guide §4.4 step 5)."""
+    traded_quantity = min(total_supply_kwh, total_demand_kwh)
+    for offer in offers:
+        offer["allocated_energy"] = (offer["energy"] / total_supply_kwh) * traded_quantity
+    for bid in bids:
+        bid["allocated_energy"] = (bid["energy"] / total_demand_kwh) * traded_quantity
 
 
 async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
@@ -140,22 +199,9 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
                 len(offers), total_supply_kwh, len(bids), total_demand_kwh)
 
     if total_supply_kwh <= 0 or total_demand_kwh <= 0:
-        # One-sided market: no trade for this slot, expire everything.
-        await asyncio.gather(*(db.update_order(o["order_id"], status="Expired")
-                               for o in open_orders))
-        logger.info("no trade for market %s (one side empty); %d orders expired",
-                    market_id, len(open_orders))
-        return {
-            "status": "no_trade",
-            "message": "supply or demand is zero — all open orders expired",
-            "market_id": market_id,
-            "community_uuid": community_uuid,
-            "time_slot": time_slot,
-            "total_supply_kwh": round(total_supply_kwh, 6),
-            "total_demand_kwh": round(total_demand_kwh, 6),
-            "num_orders_expired": len(open_orders),
-            "trades": [],
-        }
+        return await _expire_one_sided_market(
+            db, open_orders, market_id, community_uuid, time_slot,
+            total_supply_kwh, total_demand_kwh)
 
     # ---- Step 3: clearing price ----------------------------------------
     ratio = total_supply_kwh / total_demand_kwh
@@ -181,11 +227,7 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
     bids, offers, _preferred_pairs = apply_preference_allocation(bids, offers)
 
     # ---- Step 5: traded quantity + pro-rata allocations -----------------
-    traded_quantity = min(total_supply_kwh, total_demand_kwh)
-    for offer in offers:
-        offer["allocated_energy"] = (offer["energy"] / total_supply_kwh) * traded_quantity
-    for bid in bids:
-        bid["allocated_energy"] = (bid["energy"] / total_demand_kwh) * traded_quantity
+    _allocate_pro_rata(bids, offers, total_supply_kwh, total_demand_kwh)
 
     # ---- Step 7: build trade objects ------------------------------------
     trades = build_all_trades(
@@ -207,29 +249,17 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
     logger.info("market %s cleared: %d trades written, tx %s",
                 market_id, len(trades), tx_hash)
 
-    return {
-        "status": "cleared",
-        "market_id": market_id,
-        "community_uuid": community_uuid,
-        "community_name": trigger.get("community_name"),
-        "time_slot": time_slot,
-        "clearing_price_ct_per_kwh": round(clearing_price, 6),
-        "ratio": round(ratio, 6),
-        "total_supply_kwh": round(total_supply_kwh, 6),
-        "total_demand_kwh": round(total_demand_kwh, 6),
-        "traded_quantity_kwh": round(traded_quantity, 6),
-        "round_type": round_type(total_supply_kwh, total_demand_kwh),
-        "sigmoid_params": {
-            "k_upper": community.k_upper, "k_lower": community.k_lower,
-            "theta": community.theta, "steepness": community.steepness,
-        },
-        "tx_hash": tx_hash,
-        "blockchain_mode": chain.mode,
-        "pool_id": pool_id,
-        "allocations": {
-            "producers": _allocation_summary(offers, clearing_price),
-            "consumers": _allocation_summary(bids, clearing_price),
-        },
-        "num_trades": len(trades),
-        "trades": trades,
-    }
+    return _clearing_summary(
+        market_id=market_id, community_uuid=community_uuid,
+        time_slot=time_slot, clearing_price=round(clearing_price, 6),
+        total_supply_kwh=total_supply_kwh, total_demand_kwh=total_demand_kwh,
+        sigmoid_params={key: getattr(community, key)
+                        for key in _SIGMOID_PARAM_KEYS},
+        tx_hash=tx_hash, pool_id=pool_id,
+        producers=_allocation_summary(offers, clearing_price),
+        consumers=_allocation_summary(bids, clearing_price),
+        trades=trades,
+        status="cleared",
+        community_name=trigger.get("community_name"),
+        blockchain_mode=chain.mode,
+    )

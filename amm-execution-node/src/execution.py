@@ -23,6 +23,11 @@ logger = logging.getLogger("amm-execution-node.execution")
 
 _POOL_PREFIX = "AMM_POOL_"
 
+# Result-row fields written back into trade `parameters` (guide §7.5 TBD).
+_PENALTY_PARAM_KEYS = ("actual_kwh", "measurement_found", "shortfall_kwh",
+                       "shortfall_penalty_ct", "externality_kwh",
+                       "externality_penalty_ct", "total_penalty_ct")
+
 
 def compute_previous_timeslot(time_slot_sec: int, execution_offset_min: int,
                               now: float | None = None) -> int:
@@ -66,6 +71,21 @@ def _participant_from_trade(trade: dict) -> dict | None:
     logger.warning("trade %s has no identifiable pool side — skipped",
                    trade.get("trade_uuid"))
     return None
+
+
+def _apply_externality(row: dict, externality: dict | None,
+                       kwh_key: str) -> None:
+    """Copy an externality-penalty result into the participant row.
+
+    `kwh_key` names the deviation field in the penalty result
+    ("withheld_kwh" for sellers, "underreported_kwh" for buyers)."""
+    if externality is None:
+        return
+    row["externality_kwh"] = externality[kwh_key]
+    row["externality_penalty_ct"] = externality["penalty_ct"]
+    row["counterfactual_price_ct_per_kwh"] = \
+        externality["counterfactual_price_ct_per_kwh"]
+    row["counterfactual_ratio"] = externality["counterfactual_ratio"]
 
 
 async def run_execution(trigger: dict, cfg: Config,
@@ -130,29 +150,15 @@ async def run_execution(trigger: dict, cfg: Config,
             row["shortfall_penalty_ct"] = shortfall["penalty_ct"]
 
             if round_kind == SUPPLY_LIMITED:
-                externality = seller_externality_penalty(
+                _apply_externality(row, seller_externality_penalty(
                     participant["traded_kwh"], actual, cfg.penalty_eta_kwh,
                     total_supply, total_demand, traded_quantity,
-                    clearing_price, sigmoid)
-                if externality:
-                    row["externality_kwh"] = externality["withheld_kwh"]
-                    row["externality_penalty_ct"] = externality["penalty_ct"]
-                    row["counterfactual_price_ct_per_kwh"] = \
-                        externality["counterfactual_price_ct_per_kwh"]
-                    row["counterfactual_ratio"] = \
-                        externality["counterfactual_ratio"]
-        else:  # buyer
-            if round_kind == DEMAND_LIMITED:
-                externality = buyer_externality_penalty(
-                    participant["reported_kwh"], actual, total_supply,
-                    total_demand, traded_quantity, clearing_price, sigmoid)
-                if externality:
-                    row["externality_kwh"] = externality["underreported_kwh"]
-                    row["externality_penalty_ct"] = externality["penalty_ct"]
-                    row["counterfactual_price_ct_per_kwh"] = \
-                        externality["counterfactual_price_ct_per_kwh"]
-                    row["counterfactual_ratio"] = \
-                        externality["counterfactual_ratio"]
+                    clearing_price, sigmoid), "withheld_kwh")
+        elif round_kind == DEMAND_LIMITED:  # buyer
+            _apply_externality(row, buyer_externality_penalty(
+                participant["reported_kwh"], actual, total_supply,
+                total_demand, traded_quantity, clearing_price, sigmoid),
+                "underreported_kwh")
 
         row["total_penalty_ct"] = round(
             row["shortfall_penalty_ct"] + row["externality_penalty_ct"], 6)
@@ -164,18 +170,11 @@ async def run_execution(trigger: dict, cfg: Config,
         # TODO(confirm-with-supervisor): penalty output schema (guide §7.5).
         # NOTE: re-triggering recomputes and overwrites — handy for demos;
         # production idempotency policy TBD.
-        writes.append(db.update_trade(trade["trade_uuid"], status="Executed",
-                                      parameters={
-                                          "actual_kwh": row["actual_kwh"],
-                                          "measurement_found": measurement_found,
-                                          "shortfall_kwh": row["shortfall_kwh"],
-                                          "shortfall_penalty_ct": row["shortfall_penalty_ct"],
-                                          "externality_kwh": row["externality_kwh"],
-                                          "externality_penalty_ct": row["externality_penalty_ct"],
-                                          "total_penalty_ct": row["total_penalty_ct"],
-                                          "round_type": round_kind,
-                                          "execution_time": int(time.time()),
-                                      }))
+        writes.append(db.update_trade(
+            trade["trade_uuid"], status="Executed",
+            parameters={**{key: row[key] for key in _PENALTY_PARAM_KEYS},
+                        "round_type": round_kind,
+                        "execution_time": int(time.time())}))
 
     await asyncio.gather(*writes)
 

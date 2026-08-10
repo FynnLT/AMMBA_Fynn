@@ -26,6 +26,14 @@ market:
   spot_close_offset_min: -60      #  the node only reacts to orchestrator triggers, §8)
 
 # User preference mechanisms (guide §4.4 step 6, §6).
+#
+# `order`, `multipliers.mode` and `multipliers.sides` are set HERE ALONE: the
+# demo UI no longer offers them and its trigger payload carries only the three
+# numeric multiplier parameters, so these three values are whatever this file
+# (or PREFERENCE_ORDER / MULTIPLIER_MODE / MULTIPLIER_SIDES) says. Running a
+# different variant is a configuration change, not a code change — which is
+# the point while B-04 is open, and how evaluation block 1 produces its
+# comparison (pro_rata_first baseline, multiplicative vs. additive).
 preferences:
   enabled: true
   # Semantics of the allocation order. Supervisor question B-04 is unresolved,

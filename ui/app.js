@@ -22,12 +22,11 @@ const TIME_SLOT_SEC = 900;
 let idSeq = 0;
 const state = {
   config: { name: "Community 1", kUpper: 28.5, kLower: 8.0, theta: 1.0, steepness: 2.5 },
-  // Preference settings sent with the trigger; the Clearing Node owns the
-  // mechanism (Guide §4.4 step 6) — nothing here is computed in the browser.
-  preferences: {
-    order: "preferences_first", mode: "multiplicative", sides: "seller",
-    greenMultiplier: 0.10, greyLevy: 0.10, levyCap: 0.20,
-  },
+  // Numeric multiplier parameters sent with the trigger. The rules themselves
+  // (allocation order, multiplier mode/sides) stay in the backend
+  // configuration and are only *displayed* here — nothing about the
+  // mechanism is computed or chosen in the browser.
+  preferences: { greenMultiplier: 0.10, greyLevy: 0.10, levyCap: 0.20 },
   // Defaults reproduce the implementation guide's example:
   // supply 12.5 kWh vs demand 10 kWh -> ratio 1.25 -> ~15.15 ct/kWh
   // `type` = energy source (green/grey); `partner` = preferred trading
@@ -424,9 +423,12 @@ async function runClearing() {
       community_name: c.name,
       sigmoid_params: { k_upper: c.kUpper, k_lower: c.kLower,
                         theta: c.theta, steepness: c.steepness },
+      // Only the three numeric parameters. Every field of PreferenceParams is
+      // optional and resolve_preferences merges non-null values only, so the
+      // omitted settings (enabled, order, mode, sides, multipliers_enabled)
+      // fall back to the node's configuration.yaml / environment. Sending
+      // nulls would be equivalent but noisier — omit them.
       preference_params: {
-        enabled: true, order: pref.order, multipliers_enabled: true,
-        mode: pref.mode, sides: pref.sides,
         green_multiplier: pref.greenMultiplier, grey_levy: pref.greyLevy,
         levy_cap: pref.levyCap },
     }});
@@ -643,7 +645,10 @@ function renderBackendResults(res) {
       — all open orders were marked <i>Expired</i>.`);
     return;
   }
-  renderClearingResults(backendResult(res));
+  const r = backendResult(res);
+  // Report the rules the backend actually applied, not what the UI assumed.
+  renderActiveRules(r);
+  renderClearingResults(r);
 }
 
 // -------------------------------------------------- panel E: post-delivery
@@ -765,20 +770,50 @@ function renderPenalties(res) {
 // ------------------- panel C: preferences & energy-type multipliers
 //
 // Both mechanisms (Guide §4.4 step 6 / §6) live in the Clearing Node. The
-// panel only collects the parameters, which travel with the trigger next to
-// `sigmoid_params`; the results are read back out of the response.
+// demo runs the fixed combination preferences_first / multiplicative /
+// seller; the panel only collects the numeric parameters, which travel with
+// the trigger next to `sigmoid_params`. The *rules* are deliberately not
+// selectable here: supervisor question B-04 (allocation order, multiplier
+// side) is unresolved, so answering it differently must stay a configuration
+// change. The backend keeps every variant — see configuration.yaml and the
+// PREFERENCE_ORDER / MULTIPLIER_MODE / MULTIPLIER_SIDES environment vars.
 
 function readPreferenceInputs() {
   state.preferences = {
-    order: $("#pref-order").value,
-    mode: $("#pref-mode").value,
-    sides: $("#pref-sides").value,
     greenMultiplier: parseFloat($("#pref-green").value) || 0,
     greyLevy: parseFloat($("#pref-greylevy").value) || 0,
     levyCap: parseFloat($("#pref-levycap").value) || 0,
   };
   return state.preferences;
 }
+
+// Human-readable labels for what the backend reports it actually did.
+const RULE_LABELS = {
+  order: { preferences_first: "preferred pairs first",
+           pro_rata_first: "pro-rata first (pairs flagged only)" },
+  mode: { multiplicative: "multiplicative multipliers (Guide)",
+          additive: "additive multipliers (InfoPaper)" },
+  sides: { seller: "applied to sellers only",
+           both: "applied to sellers &amp; buyers" },
+};
+
+const ruleLabel = (kind, value) =>
+  RULE_LABELS[kind][value] || esc(String(value));
+
+// Read-only status line in panel C. `r` is the normalized last clearing
+// result, or null before the first run (then the configured defaults are
+// shown as unconfirmed — the backend may be configured differently).
+/*function renderActiveRules(r) {
+  const confirmed = !!r;
+  const order = ruleLabel("order", r ? r.order : "preferences_first");
+  const mode = ruleLabel("mode", r ? r.mode : "multiplicative");
+  const sides = ruleLabel("sides", r ? r.sides : "seller");
+  $("#pref-active").innerHTML =
+    `<b>Active rules:</b> ${order} · ${mode} · ${sides} — fixed for the demo;`
+    + ` both allocation orders and both formulations remain available via`
+    + ` <code>configuration.yaml</code> / environment variables.`
+    + (confirmed ? "" : ` <em>(defaults — confirmed by the next clearing run.)</em>`);
+} */
 
 function trunc(s, n) { s = String(s); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
@@ -909,9 +944,9 @@ document.addEventListener("DOMContentLoaded", () => {
   for (const id of ["pref-green", "pref-greylevy", "pref-levycap"]) {
     document.getElementById(id).addEventListener("input", readPreferenceInputs);
   }
-  for (const id of ["pref-order", "pref-mode", "pref-sides"]) {
-    document.getElementById(id).addEventListener("change", readPreferenceInputs);
-  }
+  // Configured defaults until the first clearing confirms what the backend
+  // is actually running.
+  renderActiveRules(null);
 
   $("#run-clearing").addEventListener("click", runClearing);
   $("#run-execution").addEventListener("click", runExecution);

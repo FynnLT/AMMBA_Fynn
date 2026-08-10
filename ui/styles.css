@@ -185,6 +185,18 @@ button.primary.exec:hover:not(:disabled) { background: #047857; }
   border-radius: 8px; word-break: break-all; color: var(--muted);
 }
 
+/* read-only echo of the allocation rules the Clearing Node reported */
+.rules-line {
+  font-size: 13.5px; color: var(--muted); line-height: 1.55;
+  background: #f8fafd; border: 1px solid var(--line);
+  border-radius: 8px; padding: 9px 12px; margin: 0 0 14px;
+}
+.rules-line b { color: var(--ink); }
+.rules-line code {
+  font-family: Consolas, "Courier New", monospace; font-size: 12.5px;
+  background: #eef1f6; border-radius: 4px; padding: 1px 5px;
+}
+
 /* ---------------------------------------------------------------- tables */
 
 table.data { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 8px; }

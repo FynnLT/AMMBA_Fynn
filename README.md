@@ -35,9 +35,13 @@ Then open **http://localhost:3000** and:
 2. **B — Participants**: add/remove producers and consumers, pick each
    producer's energy source (green/grey) and each side's preferred trading
    partner. The supply/demand ratio and the clearing price preview update live.
-3. **C — Preferences & Energy-Type Multipliers**: allocation order, multiplier
-   mode/sides and the bonus/levy parameters. These travel with the trigger —
-   the Clearing Node computes both mechanisms, nothing is calculated in the
+3. **C — Preferences & Energy-Type Multipliers**: the green bonus, grey levy
+   and levy cap are adjustable and travel with the trigger. The *rules* —
+   allocation order, multiplier formulation, and which side the multiplier is
+   applied to — are fixed for the demo at `preferences_first` /
+   `multiplicative` / `seller` and are not selectable in the UI; the panel
+   shows a read-only line with what the Clearing Node reported it applied.
+   The Clearing Node computes both mechanisms; nothing is calculated in the
    browser.
 4. **D — Run Clearing**: creates the market + orders in the off-chain DB and
    triggers the Clearing Node (the calls the Market Orchestrator would make).
@@ -57,10 +61,10 @@ Suggested demo scenarios:
 | Supply-limited round | lower a producer's energy below total demand | consumers rationed, price rises toward `K_upper` |
 | Mutual preferred pair | default (PV A ↔ Household 1 select each other) | the pair's 4.5 kWh is served first: PV A fills to **96.9 %** instead of the 80 % pro-rata baseline, the market still balances at 10 kWh |
 | One-sided preference | clear Household 1's partner, keep PV A's | no pair — a match needs both sides; allocation returns to pure pro-rata |
-| Allocation-order comparison | panel C → *Pro-rata first (baseline)* | the pair is still detected and flagged, but quantities are the pro-rata ones — the comparison baseline for the evaluation |
+| Allocation-order comparison | restart with `PREFERENCE_ORDER=pro_rata_first` | the pair is still detected and flagged, but quantities are the pro-rata ones — the comparison baseline for the evaluation; panel C's status line reports the change |
 | Green bonus, self-funded | default multipliers (0.10 / 0.10) | grey levy funds 37.9 % of the requested bonus; green 15.72, grey 13.63 ct/kWh; buyers pay = sellers receive |
 | Pool surplus (levy over-collects) | set the green multiplier to 0.03 | bonus paid in full, buyers still pay the uniform price, and the pool **keeps** the difference — the multiplicative formulation is not zero-sum, and the surplus is reported rather than hidden |
-| Zero-sum alternative | panel C → *Additive (InfoPaper)* | the levy follows from funding the bonus; no pool surplus for any parameter combination |
+| Zero-sum alternative | restart with `MULTIPLIER_MODE=additive` | the levy follows from funding the bonus; no pool surplus for any parameter combination |
 | Seller shortfall | in panel E, set a producer's *actual* below its allocation | `Φ = γ·K_upper·shortfall` penalty |
 | Seller withholding | supply-limited round + producer's *actual* above allocation | externality penalty + counterfactual price chart |
 | Buyer underreporting | demand-limited round + consumer's *actual* above allocation | buyer externality penalty |
@@ -86,6 +90,19 @@ preferences:
     grey_levy: 0.10
     levy_cap: 0.20
 ```
+
+The demo UI sends only `green_multiplier`, `grey_levy` and `levy_cap`; `order`,
+`mode` and `sides` come from the configuration alone, so switching variant is a
+config change rather than a code change (supervisor question **B-04** is still
+open, and evaluation block 1 compares exactly these variants):
+
+```bash
+PREFERENCE_ORDER=pro_rata_first docker-compose up      # pro-rata baseline
+MULTIPLIER_MODE=additive docker-compose up             # InfoPaper formulation
+```
+
+Panel C echoes back what the Clearing Node reported it applied, so a changed
+configuration is visible in the UI instead of silently diverging from it.
 
 Orders express their preferences with the two optional GSY-DEX order fields;
 **partners are identified by `area_uuid`**, never by the free-text

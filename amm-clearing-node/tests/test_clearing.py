@@ -208,6 +208,45 @@ async def test_clearing_is_idempotent(cfg):
 
 
 @pytest.mark.anyio
+async def test_both_paths_return_the_same_summary_shape(cfg):
+    """Fresh run and idempotent re-trigger must be interchangeable for any
+    consumer of the API (demo UI, simulation harness)."""
+    db = FakeOffchainDB(demand_limited_orders())
+    chain = MockContractClient()
+
+    first = await run_clearing(trigger(), cfg, db, chain)
+    second = await run_clearing(trigger(), cfg, db, chain)
+
+    shared = set(first) & set(second)
+    assert {"preferences", "allocations", "trades", "sigmoid_params"} <= shared
+    assert first["preferences"].keys() == second["preferences"].keys()
+    assert (first["preferences"]["multipliers"].keys()
+            == second["preferences"]["multipliers"].keys())
+    assert first["preferences"] == second["preferences"]
+    for side in ("producers", "consumers"):
+        assert (first["allocations"][side][0].keys()
+                == second["allocations"][side][0].keys())
+
+
+@pytest.mark.anyio
+async def test_summary_reports_the_preference_block(cfg):
+    result = await run_clearing(trigger(), cfg,
+                                FakeOffchainDB(demand_limited_orders()),
+                                MockContractClient())
+    preferences = result["preferences"]
+    assert preferences["order"] == "preferences_first"
+    assert preferences["mutual_pairs"] == []
+    assert preferences["multipliers"]["mode"] == "multiplicative"
+    assert preferences["multipliers"]["sides"] == "seller"
+    # every allocation row carries the two new preference columns
+    for row in (result["allocations"]["producers"]
+                + result["allocations"]["consumers"]):
+        assert row["preference_matched"] is False
+        assert row["final_energy_rate"] == pytest.approx(
+            result["clearing_price_ct_per_kwh"])
+
+
+@pytest.mark.anyio
 async def test_trigger_sigmoid_param_overrides(cfg):
     db = FakeOffchainDB([
         order(1, "Offer", "PV A", 5.0),

@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from src.clearing import run_clearing
-from src.config import Config, load_config
+from src.config import Config, PreferenceConfigError, load_config
 from src.contract import BaseContractClient, ContractError, build_contract_client
 from src.offchain_db import OffchainDBClient, OffchainDBError
 
@@ -39,12 +39,29 @@ class SigmoidParams(BaseModel):
     steepness: float | None = None
 
 
+class PreferenceParams(BaseModel):
+    """PoC convenience, same rationale as `SigmoidParams`: the demo UI passes
+    the preference settings with the trigger so both allocation orders and
+    both multiplier modes are runnable without a redeploy.
+    TODO(confirm-with-supervisor): production parameter governance
+    (configuration / contract owner), not trigger payloads."""
+    enabled: bool | None = None
+    order: str | None = None
+    multipliers_enabled: bool | None = None
+    mode: str | None = None
+    sides: str | None = None
+    green_multiplier: float | None = None
+    grey_levy: float | None = None
+    levy_cap: float | None = None
+
+
 class TriggerClearing(BaseModel):
     market_id: str = Field(min_length=1)
     community_uuid: str = Field(min_length=1)
     time_slot: int
     community_name: str | None = None
     sigmoid_params: SigmoidParams | None = None
+    preference_params: PreferenceParams | None = None
 
 
 def create_app(cfg: Config | None = None,
@@ -84,6 +101,13 @@ def create_app(cfg: Config | None = None,
         logger.error("contract failure: %s", exc)
         return JSONResponse(status_code=502, content={"detail": str(exc)})
 
+    # An unusable preference override is a client error, not an outage.
+    @app.exception_handler(PreferenceConfigError)
+    async def preference_config_error(_request: Request,
+                                      exc: PreferenceConfigError):
+        logger.error("invalid preference parameters: %s", exc)
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok", "service": "amm-clearing-node",
@@ -92,10 +116,10 @@ def create_app(cfg: Config | None = None,
     @app.post("/trigger-clearing")
     async def trigger_clearing(trigger: TriggerClearing) -> dict:
         payload = trigger.model_dump()
-        if payload.get("sigmoid_params") is not None:
-            payload["sigmoid_params"] = {
-                k: v for k, v in payload["sigmoid_params"].items()
-                if v is not None}
+        for key in ("sigmoid_params", "preference_params"):
+            if payload.get(key) is not None:
+                payload[key] = {k: v for k, v in payload[key].items()
+                                if v is not None}
         return await run_clearing(payload, cfg, db, chain)
 
     return app

@@ -218,6 +218,8 @@ details.json pre {
 }
 .notice.warn { background: var(--warn-soft); border-color: #fcd34d; color: var(--warn); }
 .notice.info { background: var(--demand-soft); border-color: #bae0fd; color: var(--demand); }
+/* a preference mechanism actually took effect */
+.notice.ok { background: var(--supply-soft); border-color: #86e0bd; color: var(--supply); }
 
 #toast {
   position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
@@ -264,6 +266,7 @@ details.json pre {
 
 .step-no.ok { background: var(--supply-soft); color: var(--supply); }
 
+.badge.ok { background: var(--supply-soft); color: var(--supply); }
 .badge.green { background: var(--supply-soft); color: var(--supply); }
 .badge.grey { background: #eef0f3; color: #586173; border: 1px solid #d8dce3; }
 

@@ -39,10 +39,10 @@ Then open **http://localhost:3000** and:
    and levy cap are adjustable and travel with the trigger. The *rules* —
    allocation order, multiplier formulation, and which side the multiplier is
    applied to — are fixed for the demo at `preferences_first` /
-   `multiplicative` / `seller` and are not selectable in the UI; the panel
-   shows a read-only line with what the Clearing Node reported it applied.
-   The Clearing Node computes both mechanisms; nothing is calculated in the
-   browser.
+   `multiplicative` / `seller` and are not selectable in the UI; after each
+   run the panel shows a read-only line with the rules the Clearing Node
+   reported it applied. The Clearing Node computes both mechanisms; nothing
+   is calculated in the browser.
 4. **D — Run Clearing**: creates the market + orders in the off-chain DB and
    triggers the Clearing Node (the calls the Market Orchestrator would make).
 5. **Results**: clearing price, sigmoid intersection, allocations with fill
@@ -101,8 +101,9 @@ PREFERENCE_ORDER=pro_rata_first docker-compose up      # pro-rata baseline
 MULTIPLIER_MODE=additive docker-compose up             # InfoPaper formulation
 ```
 
-Panel C echoes back what the Clearing Node reported it applied, so a changed
-configuration is visible in the UI instead of silently diverging from it.
+After each clearing, panel C echoes back the rules the Clearing Node reported
+it applied, so a changed configuration is visible in the UI instead of
+silently diverging from it.
 
 Orders express their preferences with the two optional GSY-DEX order fields;
 **partners are identified by `area_uuid`**, never by the free-text

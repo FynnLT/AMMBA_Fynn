@@ -800,20 +800,16 @@ const RULE_LABELS = {
 const ruleLabel = (kind, value) =>
   RULE_LABELS[kind][value] || esc(String(value));
 
-// Read-only status line in panel C. `r` is the normalized last clearing
-// result, or null before the first run (then the configured defaults are
-// shown as unconfirmed — the backend may be configured differently).
-/*function renderActiveRules(r) {
-  const confirmed = !!r;
-  const order = ruleLabel("order", r ? r.order : "preferences_first");
-  const mode = ruleLabel("mode", r ? r.mode : "multiplicative");
-  const sides = ruleLabel("sides", r ? r.sides : "seller");
-  $("#pref-active").innerHTML =
-    `<b>Active rules:</b> ${order} · ${mode} · ${sides} — fixed for the demo;`
-    + ` both allocation orders and both formulations remain available via`
-    + ` <code>configuration.yaml</code> / environment variables.`
-    + (confirmed ? "" : ` <em>(defaults — confirmed by the next clearing run.)</em>`);
-} */
+// Read-only status line in panel C: the rules the backend reported it
+// applied. `r` is the normalized last clearing result, or null before the
+// first run — then the line stays empty rather than asserting defaults the
+// UI has not been told. (Which variants exist and how to switch them is
+// documented in the README, not repeated in the panel.)
+function renderActiveRules(r) {
+  $("#pref-active").innerHTML = r
+    ? `${ruleLabel("order", r.order)} · ${ruleLabel("mode", r.mode)} · ${ruleLabel("sides", r.sides)}`
+    : "";
+}
 
 function trunc(s, n) { s = String(s); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
@@ -944,8 +940,7 @@ document.addEventListener("DOMContentLoaded", () => {
   for (const id of ["pref-green", "pref-greylevy", "pref-levycap"]) {
     document.getElementById(id).addEventListener("input", readPreferenceInputs);
   }
-  // Configured defaults until the first clearing confirms what the backend
-  // is actually running.
+  // Empty until the first clearing reports what the backend actually ran.
   renderActiveRules(null);
 
   $("#run-clearing").addEventListener("click", runClearing);

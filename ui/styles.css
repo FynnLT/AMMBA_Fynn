@@ -191,7 +191,8 @@ button.primary.exec:hover:not(:disabled) { background: #047857; }
   background: #f8fafd; border: 1px solid var(--line);
   border-radius: 8px; padding: 9px 12px; margin: 0 0 14px;
 }
-.rules-line b { color: var(--ink); }
+/* empty until the first clearing reports the rules — don't paint a bare box */
+.rules-line:empty { display: none; }
 .rules-line code {
   font-family: Consolas, "Courier New", monospace; font-size: 12.5px;
   background: #eef1f6; border-radius: 4px; padding: 1px 5px;

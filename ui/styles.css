@@ -185,6 +185,19 @@ button.primary.exec:hover:not(:disabled) { background: #047857; }
   border-radius: 8px; word-break: break-all; color: var(--muted);
 }
 
+/* read-only echo of the allocation rules the Clearing Node reported */
+.rules-line {
+  font-size: 13.5px; color: var(--muted); line-height: 1.55;
+  background: #f8fafd; border: 1px solid var(--line);
+  border-radius: 8px; padding: 9px 12px; margin: 0 0 14px;
+}
+/* empty until the first clearing reports the rules — don't paint a bare box */
+.rules-line:empty { display: none; }
+.rules-line code {
+  font-family: Consolas, "Courier New", monospace; font-size: 12.5px;
+  background: #eef1f6; border-radius: 4px; padding: 1px 5px;
+}
+
 /* ---------------------------------------------------------------- tables */
 
 table.data { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 8px; }
@@ -218,6 +231,8 @@ details.json pre {
 }
 .notice.warn { background: var(--warn-soft); border-color: #fcd34d; color: var(--warn); }
 .notice.info { background: var(--demand-soft); border-color: #bae0fd; color: var(--demand); }
+/* a preference mechanism actually took effect */
+.notice.ok { background: var(--supply-soft); border-color: #86e0bd; color: var(--supply); }
 
 #toast {
   position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
@@ -264,6 +279,7 @@ details.json pre {
 
 .step-no.ok { background: var(--supply-soft); color: var(--supply); }
 
+.badge.ok { background: var(--supply-soft); color: var(--supply); }
 .badge.green { background: var(--supply-soft); color: var(--supply); }
 .badge.grey { background: #eef0f3; color: #586173; border: 1px solid #d8dce3; }
 

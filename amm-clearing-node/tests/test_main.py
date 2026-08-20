@@ -41,6 +41,29 @@ def test_trigger_clearing_returns_full_result():
     assert body["tx_hash"].startswith("0x")
 
 
+def test_trigger_accepts_preference_params():
+    client = make_client(FakeOffchainDB(demand_limited_orders()))
+    resp = client.post("/trigger-clearing", json={
+        "market_id": MARKET, "community_uuid": "communityid_1",
+        "time_slot": 900,
+        "preference_params": {"order": "pro_rata_first", "mode": "additive"},
+    })
+    assert resp.status_code == 200
+    preferences = resp.json()["preferences"]
+    assert preferences["order"] == "pro_rata_first"
+    assert preferences["multipliers"]["mode"] == "additive"
+
+
+def test_unusable_preference_params_map_to_400():
+    client = make_client(FakeOffchainDB(demand_limited_orders()))
+    resp = client.post("/trigger-clearing", json={
+        "market_id": MARKET, "community_uuid": "communityid_1",
+        "time_slot": 900, "preference_params": {"mode": "exponential"},
+    })
+    assert resp.status_code == 400
+    assert "exponential" in resp.json()["detail"]
+
+
 def test_trigger_validates_payload():
     client = make_client(FakeOffchainDB())
     resp = client.post("/trigger-clearing", json={"market_id": "m1"})

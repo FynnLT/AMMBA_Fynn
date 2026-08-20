@@ -86,6 +86,35 @@ def test_order_validation(client):
     assert client.post("/orders-normalized", json=bad_energy).status_code == 400
 
 
+def test_preference_fields_are_stored_opaquely(client):
+    order = {"order_type": "Offer", "created_by": "PV A", "market_id": "m1",
+             "area_uuid": "area-pv-a", "time_slot": 900, "energy": 5.0,
+             "energy_rate": 8.0,
+             "attributes": {"energy_type": "grey"},
+             "requirements": {"preferred_partner": "area-house-1"}}
+    created = client.post("/orders-normalized", json=order).json()[0]
+    assert created["attributes"] == {"energy_type": "grey"}
+    assert created["requirements"] == {"preferred_partner": "area-house-1"}
+
+    stored = client.get("/orders", params={"market_id": "m1"}).json()[0]
+    assert stored["requirements"]["preferred_partner"] == "area-house-1"
+
+
+def test_energy_type_is_validated_but_preferred_partner_is_not(client):
+    base = {"order_type": "Offer", "created_by": "PV A", "market_id": "m1",
+            "area_uuid": "area-pv-a", "time_slot": 900, "energy": 5.0,
+            "energy_rate": 8.0}
+    bad = dict(base, attributes={"energy_type": "Green"})
+    assert client.post("/orders-normalized", json=bad).status_code == 400
+
+    # An unknown partner area is accepted: the DB has no cross-order view and
+    # the Clearing Node degrades unmatchable partners gracefully.
+    unknown = dict(base, requirements={"preferred_partner": "area-nowhere"})
+    assert client.post("/orders-normalized", json=unknown).status_code == 201
+    # …and so is an order without any preference data at all.
+    assert client.post("/orders-normalized", json=base).status_code == 201
+
+
 def test_scale_orders_endpoint_is_not_implemented(client):
     assert client.post("/orders", json={}).status_code == 501
 

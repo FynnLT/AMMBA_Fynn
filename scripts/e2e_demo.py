@@ -62,10 +62,11 @@ def main() -> int:
     check("market_id generated (blake2b)", market_id.startswith("0x")
           and len(market_id) == 66, market_id[:18] + "…")
 
-    def order(order_type, name, area, energy, rate):
+    def order(order_type, name, area, energy, rate, **extra):
         return {"order_type": order_type, "created_by": name,
                 "area_uuid": area, "market_id": market_id,
-                "time_slot": time_slot, "energy": energy, "energy_rate": rate}
+                "time_slot": time_slot, "energy": energy, "energy_rate": rate,
+                **extra}
 
     orders = call("POST", args.db, "/orders-normalized", json=[
         order("Offer", "PV A", "area-pv-a", 5.0, 8.0),
@@ -140,6 +141,94 @@ def main() -> int:
     check("trades marked Executed with penalties in parameters",
           all(t["status"] == "Executed" and
               "total_penalty_ct" in t["parameters"] for t in executed_trades))
+
+    print("== preferences + energy-type multipliers ==")
+    # Same market as above, but PV A and House 1 name each other as preferred
+    # partner and the battery declares itself grey. Expected (task §6.2/§6.3):
+    # the pair moves 4.5 kWh off the top, which lifts PV A from the 80 %
+    # pro-rata baseline to 96.875 %, and the grey levy funds 37.931 % of the
+    # requested green bonus.
+    pref_slot = time_slot + 1800
+    pref_market = call("POST", args.db, "/market", json={
+        "community_uuid": community, "time_slot": pref_slot})
+    pref_market_id = pref_market["market_id"]
+
+    def pref_order(order_type, name, area, energy, rate, **extra):
+        return order(order_type, name, area, energy, rate, **extra) | {
+            "market_id": pref_market_id, "time_slot": pref_slot}
+
+    call("POST", args.db, "/orders-normalized", json=[
+        pref_order("Offer", "PV A", "area-pv-a", 5.0, 8.0,
+                   attributes={"energy_type": "green"},
+                   requirements={"preferred_partner": "area-house-1"}),
+        pref_order("Offer", "PV B", "area-pv-b", 3.5, 8.0,
+                   attributes={"energy_type": "green"}),
+        pref_order("Offer", "Battery", "area-battery", 4.0, 8.0,
+                   attributes={"energy_type": "grey"}),
+        pref_order("Bid", "House 1", "area-house-1", 4.5, 28.5,
+                   requirements={"preferred_partner": "area-pv-a"}),
+        pref_order("Bid", "House 2", "area-house-2", 3.0, 28.5),
+        pref_order("Bid", "Bakery", "area-bakery", 2.5, 28.5),
+    ])
+
+    pref = call("POST", args.clearing, "/trigger-clearing", json={
+        "market_id": pref_market_id, "community_uuid": community,
+        "time_slot": pref_slot, "community_name": "E2E Community",
+        "sigmoid_params": {"k_upper": 28.5, "k_lower": 8.0,
+                           "theta": 1.0, "steepness": 2.5},
+        "preference_params": {"enabled": True, "order": "preferences_first",
+                              "multipliers_enabled": True,
+                              "mode": "multiplicative", "sides": "seller",
+                              "green_multiplier": 0.10, "grey_levy": 0.10,
+                              "levy_cap": 0.20}})
+    check("status cleared", pref["status"] == "cleared")
+    prefs = pref["preferences"]
+    check("one mutual pair (PV A <-> House 1) over 4.5 kWh",
+          prefs["mutual_pairs"] == [{"bid_area": "area-house-1",
+                                     "offer_area": "area-pv-a",
+                                     "energy_kwh": 4.5}])
+    check("pairs not rationed", prefs["pairs_rationed"] is False)
+
+    pref_producers = {p["name"]: p for p in pref["allocations"]["producers"]}
+    for name, allocated in (("PV A", 4.843750), ("PV B", 2.406250),
+                            ("Battery", 2.750000)):
+        check(f"{name} allocated {allocated:.6f} kWh",
+              abs(pref_producers[name]["allocated_kwh"] - allocated) < 1e-6,
+              f"{pref_producers[name]['allocated_kwh']:.6f}")
+    check("PV A preferentially filled to 96.875 % (pro-rata baseline: 80 %)",
+          abs(pref_producers["PV A"]["fill_rate"] - 0.968750) < 1e-6)
+    check("allocation balances at 10 kWh on both sides",
+          abs(sum(p["allocated_kwh"] for p in pref["allocations"]["producers"])
+              - 10.0) < 1e-6
+          and abs(sum(c["allocated_kwh"]
+                      for c in pref["allocations"]["consumers"]) - 10.0) < 1e-6)
+
+    mult = prefs["multipliers"]
+    for label, key, expected, tol in (
+            ("green volume 7.25 kWh", "green_alloc_kwh", 7.25, 1e-6),
+            ("grey volume 2.75 kWh", "grey_alloc_kwh", 2.75, 1e-6),
+            ("levy collected ~4.1655 ct", "levy_collected_ct", 4.16548, 1e-4),
+            ("bonus requested ~10.9817 ct", "bonus_requested_ct", 10.98172,
+             1e-4),
+            ("subsidy scaling ~0.37931", "scale", 0.37931, 1e-5),
+            ("green final ~15.7218 ct/kWh", "green_final_ct_per_kwh",
+             15.721775, 1e-5),
+            ("grey final ~13.6325 ct/kWh", "grey_final_ct_per_kwh", 13.632503,
+             1e-5),
+            ("buyers pay == sellers receive (~151.4723 ct)", "buyers_pay_ct",
+             151.47225, 1e-3),
+            ("no pool surplus while the bonus is scaled", "pool_surplus_ct",
+             0.0, 1e-3)):
+        check(label, abs(mult[key] - expected) < tol, f"{mult[key]}")
+
+    pref_trades = call("GET", args.db, f"/trades?market_id={pref_market_id}")
+    check("uniform energy_rate untouched in every trade (execution node "
+          "reads it for counterfactuals)",
+          all(abs(t["parameters"]["energy_rate"]
+                  - pref["clearing_price_ct_per_kwh"]) < 1e-9
+              for t in pref_trades))
+    check("final_energy_rate added alongside it",
+          all("final_energy_rate" in t["parameters"] for t in pref_trades))
 
     print("== no-trade slot (bids only) ==")
     nt_slot = time_slot + 900

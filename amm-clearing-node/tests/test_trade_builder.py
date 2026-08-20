@@ -3,7 +3,8 @@ import json
 
 from src.config import CommunityParams
 from src.trade_builder import (blake2b_hash, build_all_trades,
-                               build_buyer_trade, build_seller_trade)
+                               build_buyer_trade, build_seller_trade,
+                               rehash_trade)
 
 COMMUNITY = CommunityParams(k_upper=28.5, k_lower=8.0, theta=1.0, steepness=2.5)
 TX_HASH = "0x" + "ab" * 32
@@ -102,6 +103,40 @@ def test_parameters_make_execution_node_self_contained():
 
 def test_id_is_hash_of_trade_contents():
     trade = build_buyer_trade(_bid(), **_common())
+    body = {k: v for k, v in trade.items() if k != "_id"}
+    assert trade["_id"] == blake2b_hash(body)
+
+
+def test_preference_fields_travel_from_order_to_parameters():
+    offer = {**_offer(), "energy_type": "grey", "preference_matched": True,
+             "preference_partner_area": "area_h1", "preference_pair_kwh": 3.5}
+    params = build_seller_trade(
+        offer, **_common(),
+        preference_meta={"order": "preferences_first", "mode": "additive"},
+    )["parameters"]
+
+    assert params["preference_matched"] is True
+    assert params["energy_type"] == "grey"
+    assert params["preferences"]["partner_area"] == "area_h1"
+    assert params["preferences"]["pair_kwh"] == 3.5
+    assert params["preferences"]["order"] == "preferences_first"
+    # the uniform clearing price is untouched (guide §5.4 / §4.3 trap)
+    assert params["energy_rate"] == 15.1472
+    assert params["final_energy_rate"] == 15.1472
+    assert params["multiplier_applied"] == 0.0
+
+
+def test_buyer_trades_carry_the_pool_mix_not_a_single_energy_type():
+    params = build_buyer_trade({**_bid(), "energy_type": "grey"},
+                               **_common())["parameters"]
+    assert params["energy_type"] == "mixed"
+
+
+def test_rehash_after_ex_post_parameters_keeps_the_id_honest():
+    trade = build_seller_trade(_offer(), **_common())
+    original = trade["_id"]
+    trade["parameters"]["final_energy_rate"] = 16.0
+    assert rehash_trade(trade)["_id"] != original
     body = {k: v for k, v in trade.items() if k != "_id"}
     assert trade["_id"] == blake2b_hash(body)
 

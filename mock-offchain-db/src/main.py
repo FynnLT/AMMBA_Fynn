@@ -35,6 +35,13 @@ logging.basicConfig(level=logging.INFO,
 # Guide §2 order lifecycle.
 VALID_ORDER_STATUSES = ("Open", "Executed", "Expired", "Deleted")
 VALID_ORDER_TYPES = ("Bid", "Offer")
+# `attributes`/`requirements` are optional in the offchain-primitives order
+# schema and stored opaquely; only the energy type is validated, because a
+# typo there silently changes the clearing economics. `preferred_partner` is
+# deliberately NOT validated against existing areas: the DB has no
+# cross-order view, and the Clearing Node degrades unmatchable partners
+# gracefully.
+VALID_ENERGY_TYPES = ("green", "grey")
 
 
 def _as_list(payload: Union[list, dict]) -> list[dict]:
@@ -125,6 +132,13 @@ def create_app(store: InMemoryStore | None = None) -> FastAPI:
             if not isinstance(energy, (int, float)) or energy <= 0:
                 raise HTTPException(status_code=400,
                                     detail="energy must be a positive number")
+            attributes = order.get("attributes")
+            if isinstance(attributes, dict) and "energy_type" in attributes:
+                if attributes["energy_type"] not in VALID_ENERGY_TYPES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="attributes.energy_type must be "
+                               "'green' or 'grey'")
             created.append(store.add_order(order))
         logger.info("stored %d order(s)", len(created))
         return created

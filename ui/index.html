@@ -7,7 +7,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <!-- bump ?v= when styles.css/app.js change: the static servers send no
      Cache-Control headers, so browsers may otherwise reuse a stale copy -->
-<link rel="stylesheet" href="styles.css?v=2">
+<link rel="stylesheet" href="styles.css?v=4">
 </head>
 <body>
 
@@ -86,7 +86,11 @@
   <!-- C: Preferences & energy-type multipliers -->
   <section class="card" id="panel-preferences">
     <h2><span class="step-no">C</span> Preferences &amp; Energy-Type Multipliers</h2>
-    <p class="sub">Allocation rules applied during clearing (Guide §6, Phase 2): (1) mutual preferred partners are matched first at the clearing price, (2) the residual pool is split pro-rata, (3) energy-type multipliers adjust the per-trade price ex-post.</p>
+    <p class="sub">Allocation rules applied by the Clearing Node (Guide §6): (1) mutual preferred partners are served first at the clearing price, (2) the residual is split pro-rata, (3) energy-type multipliers adjust the per-trade rate ex-post. The rules themselves are configured in the backend; only the numeric parameters below are sent with the trigger.</p>
+    <!-- Read-only: filled from the last clearing response so a change in
+         configuration.yaml becomes visible here instead of silently diverging
+         from what the UI claims. -->
+    <div class="rules-line" id="pref-active"></div>
     <div class="field-row3">
       <label class="field">Green multiplier (bonus)
         <input id="pref-green" type="number" step="0.01" min="0" value="0.10">
@@ -99,14 +103,15 @@
       </label>
     </div>
     <div class="notice info">
-      <b>Green:</b> final = clearing × (1 + green_multiplier) &nbsp;·&nbsp; <b>Grey:</b> final = clearing × (1 − min(grey_levy, levy_cap)) &nbsp;·&nbsp; green bonuses are funded by grey levy revenue; if revenue is insufficient the bonus is scaled down (dynamic subsidy scaling).
+      <b>Multiplicative:</b> green = p × (1 + green_multiplier × scale), grey = p × (1 − min(grey_levy, levy_cap)); the bonus is scaled down when the levy under-collects. If the levy <em>over</em>-collects the difference stays with the pool and is reported as a surplus — it is not silently absorbed.
+      &nbsp;·&nbsp; A preferred pair only counts when <em>both</em> sides select each other.
     </div>
   </section>
 
   <!-- D: Run clearing (real backend round-trip) -->
   <section class="card" id="panel-run">
     <h2><span class="step-no">D</span> Run Clearing <small style="font-weight:400;color:var(--muted)">— backend round-trip</small></h2>
-    <p class="sub">Creates the market and orders in the off-chain DB, then triggers the Clearing Node — exactly the calls the Market Orchestrator would make. Uniform-price pro-rata clearing; the backend still stubs the Phase-2 preferences, so the energy-type multipliers from C are overlaid on the results ex-post in-browser.</p>
+    <p class="sub">Creates the market and orders in the off-chain DB, then triggers the Clearing Node — exactly the calls the Market Orchestrator would make. Preferred-partner priority and the energy-type multipliers from C are computed by the Clearing Node and returned in the response; the browser only renders them.</p>
     <button class="primary" id="run-clearing">
       <span class="spinner"></span>▶ Run Clearing
     </button>
@@ -139,6 +144,6 @@
 </div>
 
 <div id="toast"></div>
-<script src="app.js?v=4"></script>
+<script src="app.js?v=6"></script>
 </body>
 </html>

@@ -22,8 +22,11 @@ const TIME_SLOT_SEC = 900;
 let idSeq = 0;
 const state = {
   config: { name: "Community 1", kUpper: 28.5, kLower: 8.0, theta: 1.0, steepness: 2.5 },
-  // Energy-type multipliers applied ex-post per trade (Guide §4.4 step 6.3).
-  multipliers: { greenMultiplier: 0.10, greyLevy: 0.10, levyCap: 0.20 },
+  // Numeric multiplier parameters sent with the trigger. The rules themselves
+  // (allocation order, multiplier mode/sides) stay in the backend
+  // configuration and are only *displayed* here — nothing about the
+  // mechanism is computed or chosen in the browser.
+  preferences: { greenMultiplier: 0.10, greyLevy: 0.10, levyCap: 0.20 },
   // Defaults reproduce the implementation guide's example:
   // supply 12.5 kWh vs demand 10 kWh -> ratio 1.25 -> ~15.15 ct/kWh
   // `type` = energy source (green/grey); `partner` = preferred trading
@@ -42,9 +45,12 @@ const state = {
   lastMarket: null,     // {market_id, community_uuid, time_slot}
   areaByName: {},       // participant name -> area_uuid for the last run
 };
-// Demo default: PV A nominates Household 1 as preferred partner, but the
-// reverse is not set -> shows the "no mutual pair" case (as in the mockups).
+// Demo default: PV A and Household 1 nominate each other -> a mutual pair,
+// which the backend serves before the pro-rata residual (96.9 % vs 80 % fill
+// for PV A in the guide's reference market). Clear one side to see the
+// "no mutual pair" case — a match requires both.
 state.producers[0].partner = state.consumers[0].id;
+state.consumers[0].partner = state.producers[0].id;
 
 // ---------------------------------------------------------------- helpers
 
@@ -378,6 +384,13 @@ async function runClearing() {
     producers.forEach((p) => { state.areaByName[p.name] = producerAreas[p.id]; });
     consumers.forEach((x) => { state.areaByName[x.name] = consumerAreas[x.id]; });
 
+    // Preferred partners travel as `requirements.preferred_partner`, keyed by
+    // area_uuid (the canonical identity — `created_by` is a display name).
+    const requirements = (partnerId, areasOfOtherSide) => {
+      const area = partnerId ? areasOfOtherSide[partnerId] : null;
+      return area ? { requirements: { preferred_partner: area } } : {};
+    };
+
     const orders = [
       // AMMBA is a uniform-price auction: order energy_rate limits are not
       // used by the clearing; offers carry the feed-in floor, bids the
@@ -386,11 +399,14 @@ async function runClearing() {
         order_type: "Offer", created_by: p.name,
         area_uuid: producerAreas[p.id], market_id: market.market_id,
         time_slot: timeSlot, energy: +p.energy, energy_rate: c.kLower,
+        attributes: { energy_type: p.type === "grey" ? "grey" : "green" },
+        ...requirements(p.partner, consumerAreas),
       })),
       ...consumers.map((x) => ({
         order_type: "Bid", created_by: x.name,
         area_uuid: consumerAreas[x.id], market_id: market.market_id,
         time_slot: timeSlot, energy: +x.energy, energy_rate: c.kUpper,
+        ...requirements(x.partner, producerAreas),
       })),
     ];
     if (orders.length) {
@@ -399,6 +415,7 @@ async function runClearing() {
     }
 
     status.textContent = "triggering Clearing Node…";
+    const pref = readPreferenceInputs();
     const result = await api(EP.clearing, "/trigger-clearing", { body: {
       market_id: market.market_id,
       community_uuid: communityUuid,
@@ -406,6 +423,14 @@ async function runClearing() {
       community_name: c.name,
       sigmoid_params: { k_upper: c.kUpper, k_lower: c.kLower,
                         theta: c.theta, steepness: c.steepness },
+      // Only the three numeric parameters. Every field of PreferenceParams is
+      // optional and resolve_preferences merges non-null values only, so the
+      // omitted settings (enabled, order, mode, sides, multipliers_enabled)
+      // fall back to the node's configuration.yaml / environment. Sending
+      // nulls would be equivalent but noisier — omit them.
+      preference_params: {
+        green_multiplier: pref.greenMultiplier, grey_levy: pref.greyLevy,
+        levy_cap: pref.levyCap },
     }});
 
     state.lastClearing = result;
@@ -424,55 +449,72 @@ async function runClearing() {
 
 // --------------------------------------------- panel: Clearing Results
 //
-// Overview of the backend round-trip (dashboard mockup layout). The
-// Phase-2 energy-type multipliers from C are overlaid ex-post in-browser
-// — the backend clearing itself still stubs them.
+// Overview of the backend round-trip (dashboard mockup layout). Preferred-
+// partner priority and the energy-type multipliers are computed by the
+// Clearing Node and read out of the response's `preferences` block — the
+// browser does no market economics of its own.
 
 function roundBadge(roundType) {
   const cls = (roundType || "").toLowerCase().replace("_", "-");
   return `<span class="badge ${cls}">${esc((roundType || "").replace("_", "-"))}</span>`;
 }
 
+const prefBadge = (matched) => matched
+  ? ` <span class="badge ok" title="served before the pro-rata residual">paired</span>` : "";
+
 function producersTable(r) {
-  const rows = r.producers.map((p) => {
-    const fin = p.type === "grey" ? r.greyFinal : r.greenFinal;
-    return `<tr>
-      <td>${esc(p.name)}</td>
+  const rows = r.producers.map((p) => `<tr>
+      <td>${esc(p.name)}${prefBadge(p.matched)}</td>
       <td><span class="badge ${p.type}">${p.type}</span></td>
       <td class="num">${p.requested.toFixed(2)}</td>
       <td class="num">${p.allocated.toFixed(3)}</td>
       <td>${fillCell(p.requested > 0 ? p.allocated / p.requested : 0, "supply")}</td>
-      <td class="num">${fin.toFixed(2)}</td>
-      <td class="num">${fmt.eur(p.allocated * fin)}</td></tr>`;
-  }).join("");
+      <td class="num">${p.finalRate.toFixed(2)}</td>
+      <td class="num">${fmt.eur(p.allocated * p.finalRate)}</td></tr>`).join("");
   return `<table class="data"><thead><tr><th>Producer</th><th>Type</th><th class="num">Offered</th><th class="num">Allocated</th><th>Fill</th><th class="num">Final ct/kWh</th><th class="num">Revenue</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function consumersTable(r) {
   const rows = r.consumers.map((c) => `<tr>
-      <td>${esc(c.name)}</td>
+      <td>${esc(c.name)}${prefBadge(c.matched)}</td>
       <td class="num">${c.requested.toFixed(2)}</td>
       <td class="num">${c.allocated.toFixed(3)}</td>
       <td>${fillCell(c.requested > 0 ? c.allocated / c.requested : 0, "demand")}</td>
-      <td class="num">${r.clearing.toFixed(2)}</td>
-      <td class="num">${fmt.eur(c.allocated * r.clearing)}</td></tr>`).join("");
+      <td class="num">${c.finalRate.toFixed(2)}</td>
+      <td class="num">${fmt.eur(c.allocated * c.finalRate)}</td></tr>`).join("");
   return `<table class="data"><thead><tr><th>Consumer</th><th class="num">Demanded</th><th class="num">Allocated</th><th>Fill</th><th class="num">ct/kWh</th><th class="num">Cost</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
+// What the Clearing Node actually did with the preferred partners.
 function preferredMatchesHtml(r) {
-  return r.mutualPairs.length
-    ? `<div class="notice info">Mutual preferred pair(s) configured (${esc(r.mutualPairs.join(", "))}), but the backend clearing stubs Phase-2 preferences — the full volume was allocated pro-rata.</div>`
-    : `<div class="notice info">No mutual preferred pairs found — full volume allocated pro-rata. (A match requires both sides to select each other as preferred partner.)</div>`;
+  if (!r.mutualPairs.length) {
+    return `<div class="notice info">No mutual preferred pairs found — the full volume was allocated pro-rata. (A match requires <b>both</b> sides to select each other.)</div>`;
+  }
+  const list = r.mutualPairs.map((p) =>
+    `${esc(p.label)} — ${fmt.kwh(p.energy_kwh)}`).join(" · ");
+  if (r.order === "pro_rata_first") {
+    return `<div class="notice info">Mutual preferred pair(s): ${list}. Allocation order is <b>pro-rata first</b> (baseline), so the pairs are only flagged for routing — quantities are unchanged.</div>`;
+  }
+  const rationed = r.pairsRationed
+    ? ` The pairs asked for more than the market cleared and were rationed proportionally.`
+    : "";
+  return `<div class="notice ok">Mutual preferred pair(s) served first at the clearing price: ${list} (${fmt.kwh(r.preferentialKwh)} of ${fmt.kwh(r.traded)} traded). The remainder was split pro-rata.${rationed}</div>`;
 }
 
 function scalingNoticeHtml(r) {
+  if (r.greenAlloc > 0 && r.greyAlloc <= 0) {
+    return `<div class="notice warn">No grey volume in this round — the green bonus has no funding source and was not paid.</div>`;
+  }
+  const notices = [];
   if (r.greenAlloc > 0 && r.scale < 1 - 1e-9) {
-    return `<div class="notice warn">Grey levy revenue (${fmt.eur(r.levyCollected)}) does not fully cover the requested green bonus (${fmt.eur(r.bonusRequested)}). Dynamic subsidy scaling applied: green bonus reduced to ${(r.scale * 100).toFixed(0)}% so it stays self-funded.</div>`;
+    notices.push(`<div class="notice warn">Grey levy revenue (${fmt.eur(r.levyCollected)}) does not fully cover the requested green bonus (${fmt.eur(r.bonusRequested)}). Dynamic subsidy scaling applied: green bonus reduced to ${(r.scale * 100).toFixed(0)}% so it stays self-funded.</div>`);
+  } else if (r.greenAlloc > 0 && r.greyAlloc > 0) {
+    notices.push(`<div class="notice info">Grey levy revenue (${fmt.eur(r.levyCollected)}) fully funds the green bonus (${fmt.eur(r.bonusPaid)}).</div>`);
   }
-  if (r.greenAlloc > 0 && r.greyAlloc > 0) {
-    return `<div class="notice info">Grey levy revenue (${fmt.eur(r.levyCollected)}) fully funds the green bonus (${fmt.eur(r.bonusPaid)}); the remainder is a pool levy surplus.</div>`;
+  if (r.poolSurplus > 1e-6) {
+    notices.push(`<div class="notice warn">The levy over-collects: the pool retains <b>${fmt.eur(r.poolSurplus)}</b>. Buyers pay the uniform price while sellers receive less in total — the <b>${esc(r.mode)}</b> formulation is not zero-sum here. This is reported, not absorbed.</div>`);
   }
-  return "";
+  return notices.join("");
 }
 
 function renderClearingResults(r) {
@@ -523,16 +565,16 @@ function renderClearingResults(r) {
     ${producersTable(r)}
     <div class="tablecap" style="margin-top:18px"><span class="swatch demand"></span>Consumers — allocation &amp; cost</div>
     ${consumersTable(r)}
-    <div class="tablecap" style="margin-top:18px">Preferred trading-partner matches</div>
+    <div class="tablecap" style="margin-top:18px">Preferred trading-partner matches <small style="font-weight:400;color:var(--muted)">— ${esc(r.order)}</small></div>
     ${preferredMatchesHtml(r)}
-    <div class="tablecap" style="margin-top:18px">Energy-type economics (ex-post multipliers)</div>
+    <div class="tablecap" style="margin-top:18px">Energy-type economics <small style="font-weight:400;color:var(--muted)">— ${esc(r.mode)}, applied to ${esc(r.sides === "both" ? "sellers & buyers" : "sellers")}</small></div>
     <div class="statgrid">
       <div class="stat"><div class="k">Grey levy collected</div><div class="v">${fmt.eur(r.levyCollected)}</div></div>
       <div class="stat supply"><div class="k">Green bonus paid</div><div class="v">${fmt.eur(r.bonusPaid)}</div></div>
-      <div class="stat"><div class="k">Effective grey levy</div><div class="v">${(r.greyLevyEff * 100).toFixed(1)}<small>%</small></div></div>
+      <div class="stat"><div class="k">Green / grey volume</div><div class="v">${r.greenAlloc.toFixed(2)} / ${r.greyAlloc.toFixed(2)} <small>kWh</small></div></div>
     </div>
     ${scalingNoticeHtml(r)}
-    <p class="balance-summary">Buyers pay <b>${fmt.eur(r.buyersPay)}</b> · Sellers receive <b>${fmt.eur(r.sellersReceive)}</b> · Pool levy surplus <b>${fmt.eur(r.poolSurplus)}</b></p>
+    <p class="balance-summary">Buyers pay <b>${fmt.eur(r.buyersPay)}</b> · Sellers receive <b>${fmt.eur(r.sellersReceive)}</b> · Pool levy surplus <b>${fmt.eur(Math.abs(r.poolSurplus) < 1e-4 ? 0 : r.poolSurplus)}</b> <small>(rates settle at 6 decimals; sub-0.0001 ct residuals are rounding, not economics)</small></p>
     ${tradesJson}`;
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -546,32 +588,54 @@ function renderNoTrade(msgHtml) {
 }
 
 // Normalize a /trigger-clearing response to the unified result shape.
-// Energy types and configured preferred pairs are not part of the backend
-// response (Phase-2 stub) — both are looked up from the current UI state.
+// Everything about preferences and energy types comes from the backend's
+// `preferences` block and the allocation rows — the UI state is only used to
+// *configure* the run, never to recompute its economics.
 function backendResult(res) {
-  const typeByName = {};
-  for (const p of state.producers) typeByName[p.name] = p.type === "grey" ? "grey" : "green";
-  const consById = new Map(state.consumers.map((c) => [c.id, c]));
-  const mutualPairs = state.producers
-    .filter((p) => p.partner && (consById.get(p.partner) || {}).partner === p.id)
-    .map((p) => `${p.name} ↔ ${consById.get(p.partner).name}`);
   const sp = res.sigmoid_params || {};
-  return applyMultipliers({
-    producers: res.allocations.producers.map((a) => ({
-      name: a.name, type: typeByName[a.name] || "green",
-      requested: +a.requested_kwh, allocated: +a.allocated_kwh })),
-    consumers: res.allocations.consumers.map((a) => ({
-      name: a.name, requested: +a.requested_kwh, allocated: +a.allocated_kwh })),
+  const prefs = res.preferences || {};
+  const m = prefs.multipliers || {};
+  const clearing = +res.clearing_price_ct_per_kwh;
+  const row = (a) => ({
+    name: a.name, requested: +a.requested_kwh, allocated: +a.allocated_kwh,
+    finalRate: a.final_energy_rate != null ? +a.final_energy_rate : clearing,
+    matched: !!a.preference_matched, area: a.area_uuid,
+  });
+  const producers = res.allocations.producers.map(
+    (a) => ({ ...row(a), type: a.energy_type === "grey" ? "grey" : "green" }));
+  const consumers = res.allocations.consumers.map(row);
+
+  const nameByArea = {};
+  for (const p of [...producers, ...consumers]) nameByArea[p.area] = p.name;
+  const mutualPairs = (prefs.mutual_pairs || []).map((p) => ({
+    ...p,
+    label: `${nameByArea[p.offer_area] || p.offer_area} ↔ ${nameByArea[p.bid_area] || p.bid_area}`,
+  }));
+
+  return {
+    producers, consumers,
     supply: +res.total_supply_kwh, demand: +res.total_demand_kwh,
     traded: +res.traded_quantity_kwh, ratio: +res.ratio,
-    clearing: +res.clearing_price_ct_per_kwh, roundType: res.round_type,
+    clearing, roundType: res.round_type,
     chartCfg: { kUpper: sp.k_upper, kLower: sp.k_lower,
                 theta: sp.theta, steepness: sp.steepness },
-    mutualPairs,
+    // preferred-partner priority
+    order: prefs.order || "preferences_first",
+    mutualPairs, pairsRationed: !!prefs.pairs_rationed,
+    preferentialKwh: mutualPairs.reduce((s, p) => s + (+p.energy_kwh || 0), 0),
+    // energy-type multipliers
+    mode: m.mode || "multiplicative", sides: m.sides || "seller",
+    greenAlloc: +m.green_alloc_kwh || 0, greyAlloc: +m.grey_alloc_kwh || 0,
+    levyCollected: +m.levy_collected_ct || 0,
+    bonusRequested: +m.bonus_requested_ct || 0,
+    bonusPaid: +m.bonus_paid_ct || 0,
+    scale: m.scale != null ? +m.scale : 1,
+    buyersPay: +m.buyers_pay_ct || 0, sellersReceive: +m.sellers_receive_ct || 0,
+    poolSurplus: +m.pool_surplus_ct || 0,
     marketId: res.market_id, timeSlot: res.time_slot, numTrades: res.num_trades,
     txHash: res.tx_hash, simulated: (res.blockchain_mode || "mock") !== "live",
     alreadyCleared: res.status === "already_cleared", trades: res.trades,
-  }, readMultiplierInputs());
+  };
 }
 
 function renderBackendResults(res) {
@@ -581,7 +645,10 @@ function renderBackendResults(res) {
       — all open orders were marked <i>Expired</i>.`);
     return;
   }
-  renderClearingResults(backendResult(res));
+  const r = backendResult(res);
+  // Report the rules the backend actually applied, not what the UI assumed.
+  renderActiveRules(r);
+  renderClearingResults(r);
 }
 
 // -------------------------------------------------- panel E: post-delivery
@@ -702,47 +769,46 @@ function renderPenalties(res) {
 
 // ------------------- panel C: preferences & energy-type multipliers
 //
-// The backend leaves the Phase-2 preference rules (Guide §4.4 step 6 / §6)
-// as a documented stub until the GSY DEX preferences API exists. Of those
-// rules, the energy-type multipliers are applied here ex-post to the
-// backend clearing results, with dynamic subsidy scaling so the green
-// bonus stays funded by grey levy revenue.
+// Both mechanisms (Guide §4.4 step 6 / §6) live in the Clearing Node. The
+// demo runs the fixed combination preferences_first / multiplicative /
+// seller; the panel only collects the numeric parameters, which travel with
+// the trigger next to `sigmoid_params`. The *rules* are deliberately not
+// selectable here: supervisor question B-04 (allocation order, multiplier
+// side) is unresolved, so answering it differently must stay a configuration
+// change. The backend keeps every variant — see configuration.yaml and the
+// PREFERENCE_ORDER / MULTIPLIER_MODE / MULTIPLIER_SIDES environment vars.
 
-function readMultiplierInputs() {
-  state.multipliers = {
+function readPreferenceInputs() {
+  state.preferences = {
     greenMultiplier: parseFloat($("#pref-green").value) || 0,
     greyLevy: parseFloat($("#pref-greylevy").value) || 0,
     levyCap: parseFloat($("#pref-levycap").value) || 0,
   };
-  return state.multipliers;
+  return state.preferences;
 }
 
-// Energy-type multipliers (ex-post) + dynamic subsidy scaling: prices are
-// adjusted after allocation, on top of the backend's pro-rata allocations
-// and uniform clearing price. Pure w.r.t. the DOM: `m` is passed in so the
-// economics are computable (and testable) without rendered inputs.
-function applyMultipliers(r, m) {
-  const greyLevyEff = Math.min(m.greyLevy, m.levyCap);
-  let greenAlloc = 0, greyAlloc = 0;
-  for (const p of r.producers) {
-    if (p.type === "grey") greyAlloc += p.allocated;
-    else greenAlloc += p.allocated;
-  }
-  const levyCollected = greyAlloc * r.clearing * greyLevyEff;          // ct
-  const bonusRequested = greenAlloc * r.clearing * m.greenMultiplier;  // ct
-  // green bonuses are funded by grey levy revenue; scale down if insufficient
-  const scale = bonusRequested > 1e-9 ? Math.min(1, levyCollected / bonusRequested) : 1;
-  const effGreen = m.greenMultiplier * scale;
-  const greenFinal = r.clearing * (1 + effGreen);
-  const greyFinal = r.clearing * (1 - greyLevyEff);
-  const bonusPaid = scale * bonusRequested;
-  const buyersPay = r.traded * r.clearing;
-  const sellersReceive = greenAlloc * greenFinal + greyAlloc * greyFinal;
-  return Object.assign(r, {
-    m, greyLevyEff, greenAlloc, greyAlloc, levyCollected, bonusRequested,
-    bonusPaid, scale, effGreen, greenFinal, greyFinal, buyersPay,
-    sellersReceive, poolSurplus: buyersPay - sellersReceive,
-  });
+// Human-readable labels for what the backend reports it actually did.
+const RULE_LABELS = {
+  order: { preferences_first: "preferred pairs first",
+           pro_rata_first: "pro-rata first (pairs flagged only)" },
+  mode: { multiplicative: "multiplicative multipliers (Guide)",
+          additive: "additive multipliers (InfoPaper)" },
+  sides: { seller: "applied to sellers only",
+           both: "applied to sellers &amp; buyers" },
+};
+
+const ruleLabel = (kind, value) =>
+  RULE_LABELS[kind][value] || esc(String(value));
+
+// Read-only status line in panel C: the rules the backend reported it
+// applied. `r` is the normalized last clearing result, or null before the
+// first run — then the line stays empty rather than asserting defaults the
+// UI has not been told. (Which variants exist and how to switch them is
+// documented in the README, not repeated in the panel.)
+function renderActiveRules(r) {
+  $("#pref-active").innerHTML = r
+    ? `${ruleLabel("order", r.order)} · ${ruleLabel("mode", r.mode)} · ${ruleLabel("sides", r.sides)}`
+    : "";
 }
 
 function trunc(s, n) { s = String(s); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
@@ -872,8 +938,10 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   for (const id of ["pref-green", "pref-greylevy", "pref-levycap"]) {
-    document.getElementById(id).addEventListener("input", readMultiplierInputs);
+    document.getElementById(id).addEventListener("input", readPreferenceInputs);
   }
+  // Empty until the first clearing reports what the backend actually ran.
+  renderActiveRules(null);
 
   $("#run-clearing").addEventListener("click", runClearing);
   $("#run-execution").addEventListener("click", runExecution);

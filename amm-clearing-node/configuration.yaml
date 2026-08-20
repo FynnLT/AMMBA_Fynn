@@ -1,7 +1,9 @@
 # AMM Clearing Node default configuration.
 # Environment variables always override these values (guide §4.3):
 #   OFFCHAIN_DB_URL, RPC_URL, CONTRACT_ADDRESS, CLEARING_NODE_PRIVATE_KEY,
-#   TIME_SLOT_SEC, BLOCKCHAIN_MODE, HOST, PORT
+#   TIME_SLOT_SEC, BLOCKCHAIN_MODE, HOST, PORT,
+#   PREFERENCES_ENABLED, PREFERENCE_ORDER, MULTIPLIERS_ENABLED,
+#   MULTIPLIER_MODE, MULTIPLIER_SIDES, GREEN_MULTIPLIER, GREY_LEVY, LEVY_CAP
 
 application:
   host: "0.0.0.0"
@@ -22,6 +24,30 @@ market:
   time_slot_sec: 900              # 15-minute slots (GSY DEX default)
   spot_open_offset_min: -180      # market opens 3h before delivery (informational —
   spot_close_offset_min: -60      #  the node only reacts to orchestrator triggers, §8)
+
+# User preference mechanisms (guide §4.4 step 6, §6).
+#
+# `order`, `multipliers.mode` and `multipliers.sides` are set HERE ALONE: the
+# demo UI no longer offers them and its trigger payload carries only the three
+# numeric multiplier parameters, so these three values are whatever this file
+# (or PREFERENCE_ORDER / MULTIPLIER_MODE / MULTIPLIER_SIDES) says. Running a
+# different variant is a configuration change, not a code change — which is
+# the point while B-04 is open, and how evaluation block 1 produces its
+# comparison (pro_rata_first baseline, multiplicative vs. additive).
+preferences:
+  enabled: true
+  # Semantics of the allocation order. Supervisor question B-04 is unresolved,
+  # so BOTH variants must be runnable — the comparison is an evaluation result.
+  # TODO(confirm-with-supervisor): B-04.
+  order: "preferences_first"        # "preferences_first" | "pro_rata_first"
+
+  multipliers:
+    enabled: true
+    mode: "multiplicative"          # "multiplicative" (Guide) | "additive" (InfoPaper)
+    sides: "seller"                 # "seller" | "both" — also unresolved (B-04)
+    green_multiplier: 0.10
+    grey_levy: 0.10
+    levy_cap: 0.20
 
 # Per-community sigmoid parameters. Unknown communities fall back to
 # `default_community` (the demo UI creates communities on the fly).

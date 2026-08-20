@@ -2,20 +2,22 @@
 
 One call of :func:`run_clearing` executes a full market clearing cycle:
 fetch open orders, aggregate, compute the sigmoid clearing price, anchor the
-result on-chain, allocate pro-rata, write trade objects to the off-chain DB
-and update order statuses.
+result on-chain, allocate (preferred pairs first, then pro-rata — see
+:mod:`src.preferences`), write trade objects to the off-chain DB and update
+order statuses.
 """
 
 import asyncio
 import logging
 
-from src.config import Config, resolve_community
+from src.config import Config, resolve_community, resolve_preferences
 from src.contract import BaseContractClient
 from src.offchain_db import OffchainDBClient
-from src.preferences import (apply_energy_type_multipliers,
-                             apply_preference_allocation)
+from src.preferences import (GREY, MIXED, MultiplierResult,
+                             apply_energy_type_multipliers,
+                             apply_preference_allocation, bonus_scale)
 from src.sigmoid import clamp_price, sigmoid_price
-from src.trade_builder import build_all_trades
+from src.trade_builder import build_all_trades, rehash_trade
 
 logger = logging.getLogger("amm-clearing-node.clearing")
 
@@ -39,11 +41,26 @@ def round_type(total_supply_kwh: float, total_demand_kwh: float) -> str:
     return BALANCED
 
 
-def _allocation_summary(orders: list[dict], clearing_price: float) -> list[dict]:
+def _allocation_summary(orders: list[dict], clearing_price: float, *,
+                        multipliers: MultiplierResult,
+                        is_seller_side: bool) -> list[dict]:
+    """Per-order allocation rows.
+
+    `value_ct` stays at the uniform clearing price (the settlement
+    reference); `final_energy_rate` reports what the participant actually
+    receives/pays after the energy-type multiplier."""
     summary = []
     for order in orders:
         requested = order["energy"]
         allocated = order["allocated_energy"]
+        energy_type = (order.get("energy_type", "green") if is_seller_side
+                       else MIXED)
+        if not is_seller_side:
+            final_rate = multipliers.buyer_final_ct_per_kwh
+        elif energy_type == GREY:
+            final_rate = multipliers.grey_final_ct_per_kwh
+        else:
+            final_rate = multipliers.green_final_ct_per_kwh
         summary.append({
             "name": order.get("created_by", "?"),
             "area_uuid": order.get("area_uuid"),
@@ -52,6 +69,9 @@ def _allocation_summary(orders: list[dict], clearing_price: float) -> list[dict]
             "allocated_kwh": round(allocated, 6),
             "fill_rate": round(allocated / requested, 6) if requested else 0.0,
             "value_ct": round(allocated * clearing_price, 4),
+            "energy_type": energy_type,
+            "preference_matched": bool(order.get("preference_matched", False)),
+            "final_energy_rate": round(final_rate, 6),
         })
     return summary
 
@@ -61,7 +81,7 @@ def _clearing_summary(*, market_id: str, community_uuid: str, time_slot: int,
                       total_demand_kwh: float, sigmoid_params: dict,
                       tx_hash: str | None, pool_id: str, producers: list[dict],
                       consumers: list[dict], trades: list[dict],
-                      **extra) -> dict:
+                      preferences: dict, **extra) -> dict:
     """Common shape of a clearing result (fresh run and idempotent re-trigger
     build the same summary; `extra` carries the path-specific keys)."""
     return {
@@ -79,9 +99,80 @@ def _clearing_summary(*, market_id: str, community_uuid: str, time_slot: int,
         "tx_hash": tx_hash,
         "pool_id": pool_id,
         "allocations": {"producers": producers, "consumers": consumers},
+        "preferences": preferences,
         "num_trades": len(trades),
         "trades": trades,
         **extra,
+    }
+
+
+def _preferences_from_trades(trades: list[dict], pool_id: str,
+                             clearing_price: float) -> dict:
+    """Rebuild the `preferences` summary block from stored trades.
+
+    The fresh and the idempotent path must return the same shape, so every
+    input this needs is written into trade `parameters` by the trade builder
+    (run-level settings + per-trade pair/energy-type data)."""
+    meta = ((trades[0].get("parameters") or {}).get("preferences") or {})
+    seller_trades = [t for t in trades if t.get("buyer") == pool_id]
+    buyer_trades = [t for t in trades if t.get("seller") == pool_id]
+
+    def params(trade: dict) -> dict:
+        return trade.get("parameters") or {}
+
+    def allocated(trade: dict) -> float:
+        return float(params(trade).get("selected_energy", 0.0))
+
+    def final_rate(trade: dict) -> float:
+        return float(params(trade).get("final_energy_rate", clearing_price))
+
+    def first_rate(candidates: list[dict]) -> float:
+        return final_rate(candidates[0]) if candidates else clearing_price
+
+    green = [t for t in seller_trades if params(t).get("energy_type") != GREY]
+    grey = [t for t in seller_trades if params(t).get("energy_type") == GREY]
+    green_alloc = sum(allocated(t) for t in green)
+    grey_alloc = sum(allocated(t) for t in grey)
+    green_final = first_rate(green)
+    grey_final = first_rate(grey)
+
+    active = bool(meta.get("enabled") and meta.get("multipliers_enabled"))
+    bonus_requested = green_alloc * clearing_price * float(
+        meta.get("green_multiplier", 0.0) if active else 0.0)
+    bonus_paid = green_alloc * (green_final - clearing_price)
+    buyers_pay = sum(allocated(t) * final_rate(t) for t in buyer_trades)
+    sellers_receive = sum(allocated(t) * final_rate(t) for t in seller_trades)
+
+    multipliers = MultiplierResult(
+        enabled=active,
+        mode=meta.get("mode", "multiplicative"),
+        sides=meta.get("sides", "seller"),
+        green_alloc_kwh=green_alloc, grey_alloc_kwh=grey_alloc,
+        levy_collected_ct=grey_alloc * (clearing_price - grey_final),
+        bonus_requested_ct=bonus_requested, bonus_paid_ct=bonus_paid,
+        scale=bonus_scale(bonus_paid, bonus_requested),
+        green_final_ct_per_kwh=green_final, grey_final_ct_per_kwh=grey_final,
+        buyer_final_ct_per_kwh=first_rate(buyer_trades),
+        buyers_pay_ct=buyers_pay, sellers_receive_ct=sellers_receive,
+        pool_surplus_ct=buyers_pay - sellers_receive)
+
+    pairs = []
+    for trade in seller_trades:
+        pair = params(trade).get("preferences") or {}
+        if not params(trade).get("preference_matched"):
+            continue
+        component = (trade.get("offer") or {}).get("offer_component") or {}
+        pairs.append({"bid_area": pair.get("partner_area"),
+                      "offer_area": component.get("area_uuid"),
+                      "energy_kwh": round(float(pair.get("pair_kwh", 0.0)), 6)})
+    pairs.sort(key=lambda p: (p["bid_area"] or "", p["offer_area"] or ""))
+
+    return {
+        "enabled": bool(meta.get("enabled", False)),
+        "order": meta.get("order", "preferences_first"),
+        "mutual_pairs": pairs,
+        "pairs_rationed": bool(meta.get("pairs_rationed", False)),
+        "multipliers": multipliers.as_dict(),
     }
 
 
@@ -99,7 +190,8 @@ def _summary_from_existing_trades(trades: list[dict], market_id: str,
         residual_key = ("residual_bid" if component_key == "bid"
                         else "residual_offer")
         residual = (trade.get(residual_key) or {}).get("energy", 0.0)
-        allocated = (trade.get("parameters") or {}).get("selected_energy", 0.0)
+        trade_params = trade.get("parameters") or {}
+        allocated = trade_params.get("selected_energy", 0.0)
         requested = allocated + residual
         return {
             "name": trade.get(counterparty_key, "?"),
@@ -109,6 +201,11 @@ def _summary_from_existing_trades(trades: list[dict], market_id: str,
             "allocated_kwh": round(allocated, 6),
             "fill_rate": round(allocated / requested, 6) if requested else 0.0,
             "value_ct": round(allocated * clearing_price, 4),
+            "energy_type": trade_params.get("energy_type", "green"),
+            "preference_matched": bool(
+                trade_params.get("preference_matched", False)),
+            "final_energy_rate": round(
+                trade_params.get("final_energy_rate", clearing_price), 6),
         }
 
     consumers = [entry(t, "bid", "buyer") for t in trades
@@ -123,6 +220,7 @@ def _summary_from_existing_trades(trades: list[dict], market_id: str,
         sigmoid_params={key: params.get(key) for key in _SIGMOID_PARAM_KEYS},
         tx_hash=params.get("amm_tx_hash"), pool_id=pool_id,
         producers=producers, consumers=consumers, trades=trades,
+        preferences=_preferences_from_trades(trades, pool_id, clearing_price),
         status="already_cleared",
         message="trades already exist for this market_id + time_slot; "
                 "clearing is idempotent and was not re-run",
@@ -152,17 +250,6 @@ async def _expire_one_sided_market(db: OffchainDBClient, open_orders: list[dict]
     }
 
 
-def _allocate_pro_rata(bids: list[dict], offers: list[dict],
-                       total_supply_kwh: float,
-                       total_demand_kwh: float) -> None:
-    """Traded quantity + per-order `allocated_energy` (guide §4.4 step 5)."""
-    traded_quantity = min(total_supply_kwh, total_demand_kwh)
-    for offer in offers:
-        offer["allocated_energy"] = (offer["energy"] / total_supply_kwh) * traded_quantity
-    for bid in bids:
-        bid["allocated_energy"] = (bid["energy"] / total_demand_kwh) * traded_quantity
-
-
 async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
                        chain: BaseContractClient) -> dict:
     market_id = trigger["market_id"]
@@ -170,6 +257,7 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
     time_slot = int(trigger["time_slot"])
     community = resolve_community(cfg, community_uuid,
                                   trigger.get("sigmoid_params"))
+    preferences = resolve_preferences(cfg, trigger.get("preference_params"))
     pool_id = community.pool_for(community_uuid)
 
     logger.info("clearing triggered: market=%s community=%s slot=%s",
@@ -212,6 +300,10 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
         logger.warning("clearing price %.6f outside [%s, %s] — clamped to %.6f",
                        raw_price, community.k_lower, community.k_upper,
                        clearing_price)
+    # Round once, here: this is the settlement reference written into every
+    # trade object, so the multiplier economics must be derived from exactly
+    # the same number the idempotent re-trigger path reads back.
+    clearing_price = round(clearing_price, 6)
     logger.info("ratio=%.6f -> clearing price %.6f ct/kWh", ratio, clearing_price)
 
     # ---- Step 4: record on-chain (must succeed before trades are written,
@@ -221,22 +313,32 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
         time_slot=time_slot, total_supply_kwh=total_supply_kwh,
         total_demand_kwh=total_demand_kwh, clearing_price=clearing_price)
 
-    # ---- Step 6 (Phase 2 stub): preference allocation ------------------
-    # TODO(phase2): preference matching — runs before pro-rata once GSY DEX
-    # embeds `requirements`/`attributes` in orders (guide §4.4 step 6).
-    bids, offers, _preferred_pairs = apply_preference_allocation(bids, offers)
-
-    # ---- Step 5: traded quantity + pro-rata allocations -----------------
-    _allocate_pro_rata(bids, offers, total_supply_kwh, total_demand_kwh)
+    # ---- Steps 5+6: allocation (preferred pairs + pro-rata residual) ----
+    # `apply_preference_allocation` owns the whole allocation so a single
+    # function carries the balance invariant (guide §4.4 steps 5 and 6).
+    traded_quantity = min(total_supply_kwh, total_demand_kwh)
+    allocation = apply_preference_allocation(
+        bids, offers, traded_quantity=traded_quantity,
+        total_supply_kwh=total_supply_kwh, total_demand_kwh=total_demand_kwh,
+        cfg=preferences)
+    bids, offers = allocation.bids, allocation.offers
 
     # ---- Step 7: build trade objects ------------------------------------
+    preference_meta = {**preferences.as_dict(),
+                       "pairs_rationed": allocation.pairs_rationed}
     trades = build_all_trades(
         bids, offers, market_id=market_id, time_slot=time_slot,
         clearing_price=clearing_price, tx_hash=tx_hash, pool_id=pool_id,
         community=community, total_supply_kwh=total_supply_kwh,
-        total_demand_kwh=total_demand_kwh)
-    # TODO(phase2): ex-post energy-type multipliers (guide §4.4 step 6.3)
-    trades = apply_energy_type_multipliers(trades)
+        total_demand_kwh=total_demand_kwh, preference_meta=preference_meta)
+
+    # ---- Step 6.3: ex-post energy-type multipliers ----------------------
+    # Extends trade `parameters` (never overwriting `energy_rate`), so the
+    # trade ids have to be refreshed afterwards.
+    multipliers = apply_energy_type_multipliers(
+        trades, clearing_price=clearing_price, pool_id=pool_id,
+        cfg=preferences)
+    trades = [rehash_trade(trade) for trade in trades]
 
     # ---- Step 8: persist trades, then update order statuses -------------
     await db.post_trades(trades)
@@ -251,14 +353,20 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
 
     return _clearing_summary(
         market_id=market_id, community_uuid=community_uuid,
-        time_slot=time_slot, clearing_price=round(clearing_price, 6),
+        time_slot=time_slot, clearing_price=clearing_price,
         total_supply_kwh=total_supply_kwh, total_demand_kwh=total_demand_kwh,
         sigmoid_params={key: getattr(community, key)
                         for key in _SIGMOID_PARAM_KEYS},
         tx_hash=tx_hash, pool_id=pool_id,
-        producers=_allocation_summary(offers, clearing_price),
-        consumers=_allocation_summary(bids, clearing_price),
+        producers=_allocation_summary(offers, clearing_price,
+                                      multipliers=multipliers,
+                                      is_seller_side=True),
+        consumers=_allocation_summary(bids, clearing_price,
+                                      multipliers=multipliers,
+                                      is_seller_side=False),
         trades=trades,
+        preferences={**allocation.as_dict(preferences),
+                     "multipliers": multipliers.as_dict()},
         status="cleared",
         community_name=trigger.get("community_name"),
         blockchain_mode=chain.mode,

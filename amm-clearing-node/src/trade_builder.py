@@ -38,9 +38,21 @@ def _residual(total_energy: float, allocated: float, energy_rate: float) -> dict
     return None
 
 
-def _parameters(allocated: float, clearing_price: float, trade_uuid: str,
-                tx_hash: str, community, pool_id: str,
-                total_supply_kwh: float, total_demand_kwh: float) -> dict:
+def _parameters(order: dict, allocated: float, clearing_price: float,
+                trade_uuid: str, tx_hash: str, community, pool_id: str,
+                total_supply_kwh: float, total_demand_kwh: float,
+                is_participant_seller: bool,
+                preference_meta: dict | None) -> dict:
+    """Trade `parameters` (guide §5.4: the Execution Node reconstructs the
+    clearing context from these alone).
+
+    The preference fields sit *next to* `energy_rate`, never on top of it:
+    `energy_rate` remains the uniform clearing price the Execution Node uses
+    for its counterfactual penalty calculations, `final_energy_rate` carries
+    the energy-type multiplier. `preferences` repeats the run-level settings
+    so the idempotent re-trigger path can rebuild the clearing summary from
+    stored trades alone.
+    """
     return {
         "selected_energy": round(allocated, _ROUND),
         "energy_rate": round(clearing_price, _ROUND),
@@ -58,8 +70,21 @@ def _parameters(allocated: float, clearing_price: float, trade_uuid: str,
         # Lets the Execution Node identify the pool side of each trade
         # without configuration.
         "pool_id": pool_id,
-        # TODO(phase2): set when preference matching is implemented.
-        "preference_matched": False,
+        "preference_matched": bool(order.get("preference_matched", False)),
+        # Buyers are served from the uniform pool, so their trade carries the
+        # round's mix rather than a single source.
+        "energy_type": (order.get("energy_type", "green")
+                        if is_participant_seller else "mixed"),
+        # Overwritten by apply_energy_type_multipliers; the uniform price is
+        # the correct value whenever no multiplier applies.
+        "final_energy_rate": round(clearing_price, _ROUND),
+        "multiplier_applied": 0.0,
+        "preferences": {
+            **(preference_meta or {}),
+            "partner_area": order.get("preference_partner_area"),
+            "pair_kwh": round(float(order.get("preference_pair_kwh", 0.0)),
+                              _ROUND),
+        },
     }
 
 
@@ -78,7 +103,8 @@ def _component(area_uuid: str, market_id: str, time_slot: int,
 def _build_trade(order: dict, *, order_side: str, market_id: str,
                  time_slot: int, clearing_price: float, tx_hash: str,
                  pool_id: str, community, total_supply_kwh: float,
-                 total_demand_kwh: float) -> dict:
+                 total_demand_kwh: float,
+                 preference_meta: dict | None = None) -> dict:
     """Build one trade between a participant's order and the pool.
 
     `order_side` is the participant's side: "bid" (Trade A: buyer -> pool)
@@ -128,11 +154,22 @@ def _build_trade(order: dict, *, order_side: str, market_id: str,
         "offer_hash": offer_hash,
         "residual_bid": residual_bid,
         "residual_offer": residual_offer,
-        "parameters": _parameters(allocated, price, trade_uuid, tx_hash,
+        "parameters": _parameters(order, allocated, price, trade_uuid, tx_hash,
                                   community, pool_id, total_supply_kwh,
-                                  total_demand_kwh),
+                                  total_demand_kwh,
+                                  is_participant_seller=(order_side == "offer"),
+                                  preference_meta=preference_meta),
     }
-    trade["_id"] = blake2b_hash(trade)
+    return rehash_trade(trade)
+
+
+def rehash_trade(trade: dict) -> dict:
+    """(Re-)derive `_id` from the trade contents.
+
+    The energy-type multipliers extend `parameters` after the trade object is
+    built (guide §4.4 step 6.3 is explicitly ex post), so the id has to be
+    refreshed afterwards to stay the hash of what is actually stored."""
+    trade["_id"] = blake2b_hash({k: v for k, v in trade.items() if k != "_id"})
     return trade
 
 
@@ -149,12 +186,14 @@ def build_seller_trade(offer: dict, **kwargs) -> dict:
 def build_all_trades(bids: list[dict], offers: list[dict], *, market_id: str,
                      time_slot: int, clearing_price: float, tx_hash: str,
                      pool_id: str, community, total_supply_kwh: float,
-                     total_demand_kwh: float) -> list[dict]:
+                     total_demand_kwh: float,
+                     preference_meta: dict | None = None) -> list[dict]:
     common = dict(market_id=market_id, time_slot=time_slot,
                   clearing_price=clearing_price, tx_hash=tx_hash,
                   pool_id=pool_id, community=community,
                   total_supply_kwh=total_supply_kwh,
-                  total_demand_kwh=total_demand_kwh)
+                  total_demand_kwh=total_demand_kwh,
+                  preference_meta=preference_meta)
     trades = [build_buyer_trade(bid, **common) for bid in bids]
     trades += [build_seller_trade(offer, **common) for offer in offers]
     return trades

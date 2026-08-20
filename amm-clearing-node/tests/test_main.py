@@ -2,8 +2,10 @@
 
 from fastapi.testclient import TestClient
 
-from src.config import Config
-from src.contract import MockContractClient
+import pytest
+
+from src.config import CommunityParams, Config
+from src.contract import ContractError, MockContractClient
 from src.main import create_app
 from src.offchain_db import OffchainDBError
 
@@ -80,3 +82,57 @@ def test_offchain_db_failure_maps_to_502():
         "market_id": MARKET, "community_uuid": "c1", "time_slot": 900})
     assert resp.status_code == 502
     assert "connection refused" in resp.json()["detail"]
+
+
+class RecordingChainClient(MockContractClient):
+    """Mock client that records every parameter verification it was asked
+    for, so the startup check can be asserted on."""
+
+    def __init__(self, error: ContractError | None = None) -> None:
+        super().__init__()
+        self.verified: list[tuple[str, CommunityParams]] = []
+        self._error = error
+
+    async def verify_community_params(self, community_uuid, local):
+        self.verified.append((community_uuid, local))
+        if self._error is not None:
+            raise self._error
+
+
+def test_startup_aborts_when_on_chain_params_differ():
+    """A parameter mismatch must stop the service from coming up — no silent
+    operation with parameters other than the contract's."""
+    chain = RecordingChainClient(
+        ContractError("on-chain community parameters for communityid_1 "
+                      "differ from the local configuration"))
+    app = create_app(cfg=Config(communities={"communityid_1": CommunityParams()}),
+                     db=FakeOffchainDB(), chain=chain)
+
+    with pytest.raises(ContractError, match="communityid_1"):
+        with TestClient(app):
+            pass
+
+
+def test_startup_verifies_every_configured_community_once():
+    communities = {"communityid_1": CommunityParams(theta=1.0),
+                   "communityid_2": CommunityParams(theta=1.5)}
+    chain = RecordingChainClient()
+    app = create_app(cfg=Config(communities=communities),
+                     db=FakeOffchainDB(), chain=chain)
+
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+
+    assert [uuid for uuid, _ in chain.verified] == list(communities)
+    assert dict(chain.verified) == communities
+
+
+def test_startup_without_configured_communities_verifies_nothing():
+    """`Config()` has no communities — the default mock-mode startup path."""
+    chain = RecordingChainClient()
+    app = create_app(cfg=Config(), db=FakeOffchainDB(), chain=chain)
+
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+
+    assert chain.verified == []

@@ -17,8 +17,8 @@ import logging
 import re
 from uuid import uuid4
 
-from src.config import Config
-from src.sigmoid import to_node_int
+from src.config import CommunityParams, Config
+from src.sigmoid import from_node_int, to_node_int
 from src.trade_builder import blake2b_hash
 
 logger = logging.getLogger("amm-clearing-node.contract")
@@ -40,6 +40,18 @@ AMMBA_ABI = [
             {"name": "clearing_price", "type": "uint256"},
         ],
         "outputs": [{"name": "executed", "type": "bool"}],
+    },
+    {
+        "type": "function",
+        "name": "getCommunityParams",
+        "stateMutability": "view",
+        "inputs": [{"name": "community_uuid", "type": "bytes32"}],
+        "outputs": [
+            {"name": "k_upper", "type": "uint256"},
+            {"name": "k_lower", "type": "uint256"},
+            {"name": "theta", "type": "uint256"},
+            {"name": "steepness", "type": "uint256"},
+        ],
     },
     {
         "type": "function",
@@ -80,13 +92,26 @@ class BaseContractClient:
         """Record the clearing on-chain; returns the transaction hash."""
         raise NotImplementedError
 
+    async def verify_community_params(self, community_uuid: str,
+                                      local: CommunityParams) -> None:
+        """Fail fast if the on-chain parameters differ from the local config.
+
+        The contract is the single source of truth for the pricing parameters;
+        a node computing prices from different values would still pass the
+        contract's bounds check, so the anchor alone does not prove the price
+        came from the agreed parameters.
+        """
+        raise NotImplementedError
+
 
 class MockContractClient(BaseContractClient):
     """Simulated on-chain anchor — no blockchain required.
 
-    Mirrors the contract's stored state in memory so the rest of the clearing
-    flow (tx hash in trade objects, idempotent re-trigger behavior) is
-    exercised exactly as in live mode.
+    Mirrors the contract's stored state in memory, including its
+    "market already cleared" revert, so the rest of the clearing flow (tx
+    hash in trade objects, re-clearing rejected) is exercised as in live
+    mode. Not mirrored: the parameter bounds check and the on-chain
+    parameter storage — there is no chain to hold a second copy of them.
     """
 
     mode = "mock"
@@ -98,6 +123,12 @@ class MockContractClient(BaseContractClient):
                            time_slot: int, total_supply_kwh: float,
                            total_demand_kwh: float,
                            clearing_price: float) -> str:
+        # The contract reverts on a second clearing of the same market
+        # ("AMMBA: market already cleared"); mirror that here so the error
+        # path is reachable in mock mode too.
+        if market_id in self.records:
+            raise ContractError(
+                f"AMMBA: market already cleared: {market_id}")
         record = {
             "market_id": market_id,
             "community_uuid": community_uuid,
@@ -115,6 +146,16 @@ class MockContractClient(BaseContractClient):
             market_id, community_uuid, time_slot, record["total_supply"],
             record["total_demand"], record["clearing_price"], tx_hash)
         return tx_hash
+
+    async def verify_community_params(self, community_uuid: str,
+                                      local: CommunityParams) -> None:
+        """No-op: without a chain there is no second copy to compare against.
+
+        Logged at debug level only, so mock-mode startup output stays
+        identical to what it was before the check existed.
+        """
+        logger.debug("MOCK getCommunityParams(%s): no chain to verify "
+                     "against, accepting local parameters", community_uuid)
 
 
 class Web3ContractClient(BaseContractClient):
@@ -149,6 +190,46 @@ class Web3ContractClient(BaseContractClient):
         return await asyncio.to_thread(
             self._clear_market_sync, market_id, community_uuid, time_slot,
             total_supply_kwh, total_demand_kwh, clearing_price)
+
+    async def verify_community_params(self, community_uuid: str,
+                                      local: CommunityParams) -> None:
+        # Same threading pattern as `clear_market`: the web3 call is
+        # blocking, so it goes through `asyncio.to_thread`.
+        await asyncio.to_thread(self._verify_community_params_sync,
+                                community_uuid, local)
+
+    def _verify_community_params_sync(self, community_uuid: str,
+                                      local: CommunityParams) -> None:
+        try:
+            on_chain = self._contract.functions.getCommunityParams(
+                self._string_to_bytes32(community_uuid)).call()
+        except Exception as exc:  # noqa: BLE001 - normalize all web3 failures
+            # The contract reverts with "community params not set" for a
+            # community that was never registered on-chain.
+            if "community params not set" in str(exc):
+                raise ContractError(
+                    f"community {community_uuid!r} is configured locally but "
+                    f"has no parameters on-chain — call setCommunityParams "
+                    f"for it before starting the node") from exc
+            raise ContractError(
+                f"getCommunityParams({community_uuid}) failed: {exc}") from exc
+
+        # Compared as scaled integers, not floats: these are the exact values
+        # the contract stores, and float equality would be the wrong test.
+        expected = (to_node_int(local.k_upper), to_node_int(local.k_lower),
+                    to_node_int(local.theta), to_node_int(local.steepness))
+        if tuple(on_chain) != expected:
+            names = ("k_upper", "k_lower", "theta", "steepness")
+            detail = ", ".join(
+                f"{name}: on-chain {from_node_int(chain_value)} != "
+                f"local {from_node_int(local_value)}"
+                for name, chain_value, local_value
+                in zip(names, on_chain, expected))
+            raise ContractError(
+                f"on-chain community parameters for {community_uuid} differ "
+                f"from the local configuration ({detail})")
+        logger.info("community %s: on-chain parameters match local config",
+                    community_uuid)
 
     def _clear_market_sync(self, market_id: str, community_uuid: str,
                            time_slot: int, total_supply_kwh: float,

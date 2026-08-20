@@ -76,6 +76,17 @@ def create_app(cfg: Config | None = None,
         logger.info("AMM Clearing Node up: db=%s blockchain_mode=%s "
                     "time_slot_sec=%s", cfg.offchain_db_url,
                     cfg.blockchain_mode, cfg.time_slot_sec)
+        # Verified once per start, not per clearing: one check is the
+        # governance statement, while a check per clearing would add an RPC
+        # call to every slot and distort the evaluation's runtime figures.
+        # A ContractError here is deliberately not caught — the service must
+        # not come up with parameters that differ from the contract's.
+        for community_uuid, params in cfg.communities.items():
+            await chain.verify_community_params(community_uuid, params)
+        if cfg.communities:
+            logger.info("verified on-chain community parameters for %s "
+                        "(blockchain_mode=%s)",
+                        ", ".join(cfg.communities), cfg.blockchain_mode)
         yield
         await db.close()
 

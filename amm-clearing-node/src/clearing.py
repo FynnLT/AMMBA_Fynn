@@ -273,8 +273,11 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
                                              community_uuid, time_slot)
 
     # ---- Step 1: fetch open orders for the delivery window -------------
+    # `end_time` is inclusive in the off-chain DB filter, and
+    # `time_slot + time_slot_sec` is already the *next* slot — subtract one
+    # second so a slot never pulls in the following slot's orders.
     orders = await db.get_orders(market_id, start_time=time_slot,
-                                 end_time=time_slot + cfg.time_slot_sec)
+                                 end_time=time_slot + cfg.time_slot_sec - 1)
     # Executed/Expired/Deleted orders are already settled or cancelled.
     open_orders = [o for o in orders if o.get("status") == "Open"]
     bids = [o for o in open_orders if o.get("order_type") == "Bid"]

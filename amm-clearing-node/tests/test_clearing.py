@@ -189,6 +189,23 @@ async def test_orders_outside_delivery_window_are_excluded(cfg):
 
 
 @pytest.mark.anyio
+async def test_next_slot_orders_are_not_pulled_in(cfg):
+    """Regression: the order window must be exclusive at the upper end.
+
+    Both orders share the same market_id here — otherwise the market filter
+    hides the off-by-one and the test would pass without testing anything.
+    """
+    orders = demand_limited_orders() + [
+        order(99, "Offer", "Next Slot PV", 100.0, time_slot=SLOT + 900)]
+    result = await run_clearing(trigger(), cfg, FakeOffchainDB(orders),
+                                MockContractClient())
+
+    # 12.5 kWh supply from the current slot only — not 112.5.
+    assert result["total_supply_kwh"] == pytest.approx(12.5)
+    assert result["num_trades"] == 6
+
+
+@pytest.mark.anyio
 async def test_clearing_is_idempotent(cfg):
     db = FakeOffchainDB(demand_limited_orders())
     chain = MockContractClient()

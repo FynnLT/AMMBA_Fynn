@@ -19,6 +19,13 @@ blockchain:
   mode: "mock"
   rpc_url: "https://rpc.energyweb.org"
   contract_address: ""
+  # Floor for the EIP-1559 priority fee, in wei (override: MIN_PRIORITY_FEE_WEI).
+  # web3 estimates the priority fee from rewards in recent blocks. Energy Web
+  # chains produce a block every ~5 s and most blocks are empty, so that
+  # estimate is 0 and the transaction goes out at 2 x base fee (14 wei on
+  # Volta) — accepted into the mempool, never included in a block, and
+  # blocking every later transaction from the same account behind its nonce.
+  min_priority_fee_wei: 1000000000   # 1 gwei
 
 market:
   time_slot_sec: 900              # 15-minute slots (GSY DEX default)

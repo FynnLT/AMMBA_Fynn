@@ -17,3 +17,6 @@ coverage/
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# Volta evidence output (results, not part of the artifact)
+amm-smart-contract/volta_evidence*.csv

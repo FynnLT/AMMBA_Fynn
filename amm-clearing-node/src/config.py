@@ -27,6 +27,7 @@ _ENV_OVERRIDES = {
     "RPC_URL": ("rpc_url", str),
     "CONTRACT_ADDRESS": ("contract_address", str),
     "CLEARING_NODE_PRIVATE_KEY": ("private_key", str),
+    "MIN_PRIORITY_FEE_WEI": ("min_priority_fee_wei", int),
     "TIME_SLOT_SEC": ("time_slot_sec", int),
     "BLOCKCHAIN_MODE": ("blockchain_mode", str.lower),
     "HOST": ("host", str),
@@ -148,6 +149,11 @@ class Config:
     rpc_url: str = ""
     contract_address: str = ""
     private_key: str = ""
+    # Floor for the EIP-1559 priority fee, in wei. web3 derives the priority
+    # fee from recent blocks; on a PoA chain whose blocks are almost always
+    # empty that estimate is 0, the transaction is priced at 2 x base fee and
+    # validators never include it. Observed on Volta 2026-08-29.
+    min_priority_fee_wei: int = 1_000_000_000  # 1 gwei
     time_slot_sec: int = 900
     communities: dict = field(default_factory=dict)  # community_uuid -> CommunityParams
     default_community: CommunityParams = field(default_factory=CommunityParams)
@@ -204,6 +210,8 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         rpc_url=blockchain.get("rpc_url", ""),
         contract_address=blockchain.get("contract_address", ""),
         private_key="",
+        min_priority_fee_wei=int(blockchain.get("min_priority_fee_wei",
+                                                1_000_000_000)),
         time_slot_sec=int(market.get("time_slot_sec", 900)),
         communities={uuid: _community_from_yaml(c or {})
                      for uuid, c in communities_raw.items()},

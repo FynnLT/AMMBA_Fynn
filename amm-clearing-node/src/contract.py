@@ -162,17 +162,47 @@ class Web3ContractClient(BaseContractClient):
     mode = "live"
 
     def __init__(self, rpc_url: str, contract_address: str,
-                 private_key: str) -> None:
+                 private_key: str,
+                 min_priority_fee_wei: int = 1_000_000_000) -> None:
         # web3 imported lazily so mock mode runs without the dependency.
         from web3 import Web3
 
         self._Web3 = Web3
         self._w3 = Web3(Web3.HTTPProvider(rpc_url))
         self._account = self._w3.eth.account.from_key(private_key)
+        self._min_priority_fee_wei = int(min_priority_fee_wei)
         self._contract = self._w3.eth.contract(
             address=Web3.to_checksum_address(contract_address), abi=AMMBA_ABI)
-        logger.info("live contract client: %s as %s via %s",
-                    contract_address, self._account.address, rpc_url)
+        logger.info("live contract client: %s as %s via %s "
+                    "(min priority fee %s wei)",
+                    contract_address, self._account.address, rpc_url,
+                    self._min_priority_fee_wei)
+
+    def _fee_params(self) -> dict:
+        """Explicit EIP-1559 fees with a floor under the priority fee.
+
+        Left to itself, web3 derives the priority fee from the rewards in
+        recent blocks. On a PoA chain that produces a block every few seconds
+        and whose blocks are almost always empty, those rewards are 0, so the
+        transaction goes out at `maxFeePerGas = 2 x base_fee` — 14 wei on
+        Volta — and validators never include it. It then sits in the mempool
+        and blocks every later transaction from the same account behind its
+        nonce.
+
+        Observed on Volta 2026-08-29: the first clearing of a run was priced
+        at 1 gwei (recent blocks still held our own transactions) and mined in
+        5 s; the second was priced at 14 wei and stayed pending.
+        """
+        try:
+            estimated = int(self._w3.eth.max_priority_fee)
+        except Exception:  # noqa: BLE001 - not every node implements it
+            estimated = 0
+        priority = max(estimated, self._min_priority_fee_wei)
+        base_fee = self._w3.eth.get_block("latest").get("baseFeePerGas") or 0
+        return {
+            "maxPriorityFeePerGas": priority,
+            "maxFeePerGas": priority + 2 * int(base_fee),
+        }
 
     def _string_to_bytes32(self, value: str) -> bytes:
         """community_uuid strings (e.g. "communityid_1") are not 32 bytes.
@@ -248,6 +278,7 @@ class Web3ContractClient(BaseContractClient):
                 "from": self._account.address,
                 "nonce": self._w3.eth.get_transaction_count(
                     self._account.address),
+                **self._fee_params(),
             })
             signed = self._account.sign_transaction(tx)
             # web3 v6 names it rawTransaction, v7 raw_transaction
@@ -275,7 +306,8 @@ def build_contract_client(cfg: Config) -> BaseContractClient:
             raise ValueError(
                 f"BLOCKCHAIN_MODE=live requires {', '.join(missing)}")
         return Web3ContractClient(cfg.rpc_url, cfg.contract_address,
-                                  cfg.private_key)
+                                  cfg.private_key,
+                                  cfg.min_priority_fee_wei)
     if cfg.blockchain_mode != "mock":
         raise ValueError(f"unknown BLOCKCHAIN_MODE {cfg.blockchain_mode!r}")
     return MockContractClient()

@@ -39,26 +39,50 @@ async function main() {
   console.log(`Clearing node:       ${clearingNode}`);
   console.log(`Community uuid:      ${communityUuid}`);
 
+  // Transaction hash, block and gas are printed for every write: on a public
+  // network these three lines are the deployment evidence, and reconstructing
+  // them from a block explorer afterwards is avoidable work.
+  const report = (label, receipt, hash) =>
+    console.log(`  ${label.padEnd(20)} tx ${hash} ` +
+                `block ${receipt.blockNumber} gas ${receipt.gasUsed}`);
+
   const AMMBA = await ethers.getContractFactory("AMMBA");
   const ammba = await AMMBA.deploy();
   await ammba.waitForDeployment();
   const address = await ammba.getAddress();
+  const deployTx = ammba.deploymentTransaction();
+  const deployReceipt = await deployTx.wait();
   console.log(`AMMBA deployed at:   ${address}`);
+  report("deployment", deployReceipt, deployTx.hash);
 
-  await (await ammba.setClearingNode(clearingNode, true)).wait();
+  const nodeTx = await ammba.setClearingNode(clearingNode, true);
+  const nodeReceipt = await nodeTx.wait();
   console.log("Clearing node authorized.");
+  report("setClearingNode", nodeReceipt, nodeTx.hash);
 
   const communityBytes32 = toBytes32(communityUuid);
-  await (
-    await ammba.setCommunityParams(
-      communityBytes32,
-      COMMUNITY_DEFAULTS.kUpper,
-      COMMUNITY_DEFAULTS.kLower,
-      COMMUNITY_DEFAULTS.theta,
-      COMMUNITY_DEFAULTS.steepness
-    )
-  ).wait();
+  const paramsTx = await ammba.setCommunityParams(
+    communityBytes32,
+    COMMUNITY_DEFAULTS.kUpper,
+    COMMUNITY_DEFAULTS.kLower,
+    COMMUNITY_DEFAULTS.theta,
+    COMMUNITY_DEFAULTS.steepness
+  );
+  const paramsReceipt = await paramsTx.wait();
   console.log(`Community params set for ${communityBytes32}`);
+  report("setCommunityParams", paramsReceipt, paramsTx.hash);
+
+  // Read the parameters back out of the contract rather than trusting that
+  // the write went through: the Clearing Node refuses to start if these
+  // differ from configuration.yaml, so a mismatch is better found here.
+  const onChain = await ammba.getCommunityParams(communityBytes32);
+  console.log(`On-chain params:     k_upper ${onChain[0]}, k_lower ${onChain[1]}, ` +
+              `theta ${onChain[2]}, steepness ${onChain[3]}`);
+  console.log(`Owner:               ${await ammba.owner()}`);
+  console.log(`Whitelisted ${clearingNode}: ` +
+              `${await ammba.authorizedClearingNodes(clearingNode)}`);
+  console.log(`Whitelisted ${deployer.address}: ` +
+              `${await ammba.authorizedClearingNodes(deployer.address)}`);
 
   console.log("\nClearing Node env vars for live mode:");
   console.log(`  BLOCKCHAIN_MODE=live`);

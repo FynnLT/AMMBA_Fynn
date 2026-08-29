@@ -6,6 +6,12 @@ numbers from the implementation guide's reference example.
 
 Usage:
     python scripts/e2e_demo.py [--db URL] [--clearing URL] [--execution URL]
+                               [--community UUID] [--slot-offset N]
+
+    Mock mode (default stack): no arguments needed.
+    Live mode (BLOCKCHAIN_MODE=live): pass a community that deploy.js has
+    registered on-chain, e.g. --community communityid_1, and increment
+    --slot-offset for every additional run in the same 15-minute window.
 """
 
 import argparse
@@ -22,9 +28,38 @@ def main() -> int:
     parser.add_argument("--db", default="http://localhost:8080")
     parser.add_argument("--clearing", default="http://localhost:8081")
     parser.add_argument("--execution", default="http://localhost:8082")
+    # In live mode the community must already have on-chain parameters:
+    # AMMBA.sol::clearMarket reverts with "community params not set" for any
+    # community that scripts/deploy.js never registered. The generated default
+    # is therefore usable in mock mode only.
+    parser.add_argument("--community", default=None,
+                        help="community_uuid to clear for; must be registered "
+                             "on-chain in live mode (default: generated)")
+    # market_id is blake2b("spot" + time_slot), so the delivery slot alone
+    # determines it: two runs in the same 15-minute window collide. Vary this
+    # to get a distinct market_id per run.
+    parser.add_argument("--slot-offset", type=int, default=4,
+                        help="delivery slot in 15-min steps ahead of now "
+                             "(default: 4); vary it for a distinct market_id")
+    # /trigger-clearing is synchronous and, in live mode, waits for the
+    # clearMarket receipt inside the request. On a public chain that is block
+    # time plus confirmation, not milliseconds, so the client timeout has to
+    # cover it: 20 s is fine against a local node and too tight for Volta.
+    parser.add_argument("--timeout", type=float, default=20.0,
+                        help="HTTP client timeout in seconds (default: 20; "
+                             "use 120 against a public chain)")
+    # Without this the run is indistinguishable from a live one: every check
+    # below passes identically in mock mode, and the "tx hash" it asserts is a
+    # blake2b simulation. Three full runs were mistaken for on-chain evidence
+    # on 2026-08-29 for exactly this reason.
+    parser.add_argument("--expect-mode", choices=("mock", "live"),
+                        default=None,
+                        help="abort unless the Clearing Node reports this "
+                             "blockchain_mode; use --expect-mode live when "
+                             "the run is meant to produce on-chain evidence")
     args = parser.parse_args()
 
-    http = httpx.Client(timeout=20)
+    http = httpx.Client(timeout=args.timeout)
 
     def call(method: str, base: str, path: str, **kwargs):
         resp = http.request(method, base + path, **kwargs)
@@ -40,11 +75,20 @@ def main() -> int:
 
     print("== health ==")
     check("mock-offchain-db", call("GET", args.db, "/health_check")["status"] == "ok")
-    check("clearing node", call("GET", args.clearing, "/health")["status"] == "ok")
+    clearing_health = call("GET", args.clearing, "/health")
+    check("clearing node", clearing_health["status"] == "ok")
     check("execution node", call("GET", args.execution, "/health")["status"] == "ok")
 
-    community = f"community-e2e-{int(time.time())}"
-    time_slot = (int(time.time()) // 900 + 4) * 900
+    # The anchor mode decides what this run is evidence of, so it is stated
+    # once, loudly, and optionally enforced.
+    mode = clearing_health.get("blockchain_mode", "unknown")
+    print(f"  >> blockchain_mode: {mode}")
+    if args.expect_mode:
+        check(f"blockchain_mode is {args.expect_mode}", mode == args.expect_mode,
+              f"got {mode}")
+
+    community = args.community or f"community-e2e-{int(time.time())}"
+    time_slot = (int(time.time()) // 900 + args.slot_offset) * 900
 
     print("== create market + orders (guide example: 12.5 vs 10 kWh) ==")
     market = call("POST", args.db, "/market", json={
@@ -92,7 +136,8 @@ def main() -> int:
     check("ratio 1.25", abs(result["ratio"] - 1.25) < 1e-9)
     check("round DEMAND_LIMITED", result["round_type"] == "DEMAND_LIMITED")
     check("6 trades (one per participant)", result["num_trades"] == 6)
-    check("simulated tx hash", result["tx_hash"].startswith("0x"))
+    check(f"{'on-chain' if mode == 'live' else 'simulated'} tx hash",
+          result["tx_hash"].startswith("0x"), result["tx_hash"])
     producers = {p["name"]: p for p in result["allocations"]["producers"]}
     check("producers filled pro-rata at 80%",
           all(abs(p["fill_rate"] - 0.8) < 1e-9 for p in producers.values()))

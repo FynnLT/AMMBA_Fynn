@@ -8,6 +8,7 @@ from src.config import CommunityParams, Config
 from src.contract import ContractError, MockContractClient
 from src.main import create_app
 from src.offchain_db import OffchainDBError
+from src.preferences import AllocationError
 
 from .test_clearing import FakeOffchainDB, demand_limited_orders, MARKET
 
@@ -136,3 +137,19 @@ def test_startup_without_configured_communities_verifies_nothing():
         assert client.get("/health").status_code == 200
 
     assert chain.verified == []
+
+
+def test_allocation_invariant_answers_a_defined_error(monkeypatch):
+    """The conservation invariant must not escape as an unhandled error."""
+    def broken(*_args, **_kwargs):
+        raise AllocationError("allocation must balance: bids=4.0 offers=10.0")
+
+    monkeypatch.setattr("src.clearing.apply_preference_allocation", broken)
+    client = make_client(FakeOffchainDB(demand_limited_orders()))
+
+    resp = client.post("/trigger-clearing", json={
+        "market_id": MARKET, "community_uuid": "communityid_1",
+        "time_slot": 900})
+
+    assert resp.status_code == 500
+    assert "allocation must balance" in resp.json()["detail"]

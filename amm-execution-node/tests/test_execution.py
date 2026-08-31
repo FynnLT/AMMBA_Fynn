@@ -61,10 +61,12 @@ def buyer_trade(uuid, name, area, traded, requested, price, supply, demand):
 
 
 class FakeOffchainDB:
-    def __init__(self, trades=None, measurements=None, markets=None):
+    def __init__(self, trades=None, measurements=None, markets=None,
+                 forecasts=None):
         self.trades = {t["trade_uuid"]: t for t in (trades or [])}
-        # (area_uuid, time_slot) -> kWh
+        # (area_uuid, time_slot) -> kWh, on both channels
         self.measurements = measurements or {}
+        self.forecasts = forecasts or {}
         self.markets = markets or []
         self.trade_patches = []
 
@@ -75,12 +77,25 @@ class FakeOffchainDB:
         return [t for t in self.trades.values()
                 if t["market_id"] == market_id]
 
-    async def get_measurements(self, community_uuid, area_uuid=None, time_slot=None):
+    @staticmethod
+    def _rows(channel, community_uuid, time_slot, time_slot_sec, area_uuid):
+        # Mirrors the real client: an inclusive [t, t + Δ - 1] window.
+        end_time = time_slot + time_slot_sec - 1
         return [{"community_uuid": community_uuid, "area_uuid": area,
                  "time_slot": slot, "energy_kwh": kwh}
-                for (area, slot), kwh in self.measurements.items()
+                for (area, slot), kwh in channel.items()
                 if (area_uuid is None or area == area_uuid)
-                and (time_slot is None or slot == time_slot)]
+                and time_slot <= slot <= end_time]
+
+    async def get_measurements(self, community_uuid, time_slot, time_slot_sec,
+                               area_uuid=None):
+        return self._rows(self.measurements, community_uuid, time_slot,
+                          time_slot_sec, area_uuid)
+
+    async def get_forecasts(self, community_uuid, time_slot, time_slot_sec,
+                            area_uuid=None):
+        return self._rows(self.forecasts, community_uuid, time_slot,
+                          time_slot_sec, area_uuid)
 
     async def get_community_markets(self, community_uuid):
         return self.markets
@@ -109,7 +124,7 @@ def cfg():
 
 # ---------------------------------------------------------- supply-limited
 
-def supply_limited_db(measurements):
+def supply_limited_db(measurements, forecasts=None):
     # supply 8 < demand 10, price ~20.76, traded quantity 8;
     # sellers fully filled, buyers filled at 80%.
     price = sigmoid_price(0.8, **SIGMOID)
@@ -119,7 +134,7 @@ def supply_limited_db(measurements):
         buyer_trade("t-h1", "House 1", "area_h1", 4.8, 6.0, price, 8.0, 10.0),
         buyer_trade("t-h2", "House 2", "area_h2", 3.2, 4.0, price, 8.0, 10.0),
     ]
-    return FakeOffchainDB(trades, measurements), price
+    return FakeOffchainDB(trades, measurements, forecasts=forecasts), price
 
 
 @pytest.mark.anyio
@@ -156,6 +171,11 @@ async def test_supply_limited_round(cfg):
     assert rows["House 1"]["total_penalty_ct"] == 0.0
     assert rows["House 2"]["total_penalty_ct"] == 0.0
 
+    # Without a forecast channel every row falls back to the meter, which is
+    # what produced the figures asserted above.
+    assert {r["deliverable_source"] for r in result["results"]} == {"meter"}
+    assert rows["PV B"]["deliverable_kwh"] == pytest.approx(5.0)
+
     # penalties written back into trade parameters, trades marked Executed
     assert len(db.trade_patches) == 4
     assert db.trades["t-pva"]["status"] == "Executed"
@@ -163,6 +183,70 @@ async def test_supply_limited_round(cfg):
         pytest.approx(31.35)
     # original clearing parameters survive the merge
     assert db.trades["t-pva"]["parameters"]["amm_tx_hash"] == "0x" + "ab" * 32
+
+
+@pytest.mark.anyio
+async def test_forecast_makes_a_successful_withholder_visible(cfg):
+    """The point of the second channel (issue #13).
+
+    PV B trades 3.0 kWh and delivers exactly 3.0, so the meter shows no
+    deviation at all: measured == traded, and with a single channel
+    `W_sell = max(0, deliverable - traded - eta)` is zero by construction.
+    The forecast says the area could have delivered 5.0, which is what the
+    externality penalty is meant to catch.
+    """
+    db, price = supply_limited_db(
+        {("area_pva", SLOT): 5.0, ("area_pvb", SLOT): 3.0,
+         ("area_h1", SLOT): 4.8, ("area_h2", SLOT): 3.2},
+        forecasts={("area_pvb", SLOT): 5.0})
+    result = await run_execution(trigger(), cfg, db)
+
+    rows = {r["name"]: r for r in result["results"]}
+    pv_b = rows["PV B"]
+    assert pv_b["deliverable_source"] == "forecast"
+    assert pv_b["deliverable_kwh"] == pytest.approx(5.0)
+    # delivered as traded -> no shortfall, but 2 kWh withheld
+    assert pv_b["shortfall_penalty_ct"] == 0.0
+    assert pv_b["externality_kwh"] == pytest.approx(2.0)
+    assert pv_b["externality_penalty_ct"] == pytest.approx(
+        (price - 18.25) * 8.0, abs=1e-4)
+    assert pv_b["externality_penalty_ct"] > 0.0
+
+    # the provenance travels with the penalty write-back
+    assert db.trades["t-pvb"]["parameters"]["deliverable_source"] == "forecast"
+    assert db.trades["t-pvb"]["parameters"]["deliverable_kwh"] ==         pytest.approx(5.0)
+
+
+@pytest.mark.anyio
+async def test_forecast_coverage_is_per_area(cfg):
+    # Only PV B carries a forecast; PV A falls back to its meter reading in
+    # the same slot, independently.
+    db, _ = supply_limited_db(
+        {("area_pva", SLOT): 5.0, ("area_pvb", SLOT): 3.0,
+         ("area_h1", SLOT): 4.8, ("area_h2", SLOT): 3.2},
+        forecasts={("area_pvb", SLOT): 5.0})
+    result = await run_execution(trigger(), cfg, db)
+
+    rows = {r["name"]: r for r in result["results"]}
+    assert rows["PV B"]["deliverable_source"] == "forecast"
+    assert rows["PV A"]["deliverable_source"] == "meter"
+    assert rows["PV A"]["deliverable_kwh"] == pytest.approx(5.0)
+    # PV A traded 5.0 and delivered 5.0 -> nothing to penalise either way
+    assert rows["PV A"]["total_penalty_ct"] == 0.0
+
+
+@pytest.mark.anyio
+async def test_forecast_from_another_slot_is_ignored(cfg):
+    # The forecast window is the slot's own; the next slot's row must not
+    # leak in and manufacture a withholding penalty.
+    db, _ = supply_limited_db(
+        {("area_pvb", SLOT): 3.0},
+        forecasts={("area_pvb", SLOT + 900): 5.0})
+    result = await run_execution(trigger(), cfg, db)
+
+    pv_b = {r["name"]: r for r in result["results"]}["PV B"]
+    assert pv_b["deliverable_source"] == "meter"
+    assert pv_b["externality_penalty_ct"] == 0.0
 
 
 # ---------------------------------------------------------- demand-limited

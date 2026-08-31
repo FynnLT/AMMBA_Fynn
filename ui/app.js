@@ -698,7 +698,7 @@ async function runExecution() {
     }));
 
     status.textContent = "posting smart-meter measurements…";
-    await api(EP.db, "/asset_measurements", { body: measurements });
+    await api(EP.db, "/measurements", { body: measurements });
 
     status.textContent = "triggering Execution Node…";
     const res = await api(EP.execution, "/trigger-execution", { body: {

@@ -1,22 +1,24 @@
 """Mock GSY-DEX Off-Chain Database.
 
-In-memory stand-in for the GSY-DEX off-chain storage service, which does not
-exist yet. It implements the REST endpoints documented in the AMMBA
-implementation guide (Section 2) so that the Clearing Node and Execution Node
-are developed against the real interface and can be pointed at the production
-DB later with zero changes to their core logic (only `OFFCHAIN_DB_URL`).
+In-memory stand-in for the GSY-DEX off-chain storage service, which is not
+deployed yet. The route set follows the production service
+(gsy-decentralized-exchange main @ aa99ea2,
+gsy-offchain-storage/src/startup.rs) so that the Clearing Node and Execution
+Node are developed against the real interface and can be pointed at the
+production DB later with zero changes to their core logic (only
+`OFFCHAIN_DB_URL`).
 
 Mock-only conveniences, each clearly marked:
 
-* ``POST /market`` generates ``market_id`` (blake2b-256 of "spot" +
-  delivery timestamp bytes) when the caller does not provide one — in
+* ``POST /market`` generates ``market_id`` (blake2b-256 of "Spot" + the
+  big-endian delivery timestamp) when the caller does not provide one — in
   production the Market Orchestrator owns this id.
-* ``PATCH /orders/{order_id}`` — TODO(confirm-with-supervisor): unknown
-  whether the production orderbook exposes this (guide §7.2). In GSY-DEX,
-  status updates are driven by the blockchain event listener instead.
+* ``PATCH /orders/{order_id}`` — the production service registers no PATCH
+  route; there, order status is driven by the blockchain event listener. The
+  clients treat a 404/405 on it as a no-op, so this stays a pure convenience.
 * ``PATCH /trades/{trade_uuid}`` — TODO(confirm-with-supervisor): penalty
-  output schema is unresolved (guide §7.5). The PoC extends the trade
-  ``parameters`` field through this endpoint.
+  output schema is unresolved. The PoC extends the trade ``parameters``
+  field through this endpoint.
 * ``POST /reset`` — wipes the store (used by tests and demos).
 """
 
@@ -145,9 +147,9 @@ def create_app(store: InMemoryStore | None = None) -> FastAPI:
 
     @app.patch("/orders/{order_id}")
     async def patch_order(order_id: str, patch: dict = Body(...)) -> dict:
-        # MOCK-ONLY endpoint.
-        # TODO(confirm-with-supervisor): does a PATCH /orders/{id} endpoint
-        # exist in the production orderbook service? (guide §7.2)
+        # MOCK-ONLY endpoint: the production service registers no PATCH route
+        # for orders (gsy-offchain-storage/src/startup.rs @ aa99ea2), where
+        # the blockchain event listener drives order status instead.
         order = store.orders.get(order_id)
         if order is None:
             raise HTTPException(status_code=404,
@@ -182,9 +184,9 @@ def create_app(store: InMemoryStore | None = None) -> FastAPI:
 
     @app.patch("/trades/{trade_uuid}")
     async def patch_trade(trade_uuid: str, patch: dict = Body(...)) -> dict:
-        # MOCK-ONLY endpoint.
-        # TODO(confirm-with-supervisor): penalty output schema unresolved
-        # (guide §7.5) — PoC extends the trade `parameters` field in place.
+        # MOCK-ONLY endpoint, like PATCH /orders above.
+        # TODO(confirm-with-supervisor): penalty output schema unresolved —
+        # the PoC extends the trade `parameters` field in place.
         trade = store.trades.get(trade_uuid)
         if trade is None:
             raise HTTPException(status_code=404,
@@ -197,20 +199,23 @@ def create_app(store: InMemoryStore | None = None) -> FastAPI:
             trade["parameters"] = merged
         return trade
 
-    # ------------------------------------------------------- measurements
+    # ------------------------------------------- measurements / forecasts
 
-    @app.get("/asset_measurements")
-    async def get_asset_measurements(
-            community_uuid: str = Query(...),
+    @app.get("/measurements")
+    async def get_measurements(
             area_uuid: str | None = Query(default=None),
-            time_slot: int | None = Query(default=None)) -> list:
-        # `area_uuid` is optional in the mock (returns the whole community
-        # when omitted) — the documented production API requires it.
-        return store.query_measurements(community_uuid, area_uuid, time_slot)
+            start_time: int | None = Query(default=None),
+            end_time: int | None = Query(default=None),
+            community_uuid: str | None = Query(default=None)) -> list:
+        # `start_time`/`end_time` are inclusive on both ends, exactly as on
+        # /orders, so one slot is asked for as [t, t + Δ - 1].
+        # `community_uuid` is a MOCK-ONLY convenience filter: the production
+        # route keys on area and time window alone.
+        return store.query_measurements(community_uuid, area_uuid,
+                                        start_time, end_time)
 
-    @app.post("/asset_measurements", status_code=201)
-    async def post_asset_measurements(
-            payload: Union[list, dict] = Body(...)) -> list:
+    @app.post("/measurements", status_code=201)
+    async def post_measurements(payload: Union[list, dict] = Body(...)) -> list:
         measurements = _as_list(payload)
         created = []
         for m in measurements:
@@ -225,6 +230,51 @@ def create_app(store: InMemoryStore | None = None) -> FastAPI:
             # corrected meter values overwrite instead of duplicating.
             created.append(store.upsert_measurement(m))
         logger.info("stored %d measurement(s)", len(created))
+        return created
+
+    @app.get("/forecasts")
+    async def get_forecasts(
+            area_uuid: str | None = Query(default=None),
+            start_time: int | None = Query(default=None),
+            end_time: int | None = Query(default=None),
+            community_uuid: str | None = Query(default=None)) -> list:
+        # Same filter semantics as /measurements above, so the Execution Node
+        # queries both channels identically.
+        return store.query_forecasts(community_uuid, area_uuid,
+                                     start_time, end_time)
+
+    @app.post("/forecasts", status_code=201)
+    async def post_forecasts(payload: Union[list, dict] = Body(...)) -> list:
+        """A *forecast*, not a meter reading.
+
+        In production this channel carries `ForecastSchema`
+        (gsy-decentralized-exchange main @ aa99ea2,
+        offchain-primitives/src/db_api_schema/profiles.rs): what an area
+        expected to deliver or consume in a slot. The mock provides it
+        because the evaluation has to separate what *was* delivered from what
+        *could have been* delivered — with only a meter reading the two are
+        equal by construction and a successful withholder is invisible.
+        """
+        # SIGN CONVENTION: GSY's own E2E fixtures use consumption positive and
+        # generation negative (`energy_kwh: -8.0` for a producer). This
+        # artifact keeps kWh positive on both channels, as /measurements
+        # already does and as the penalty arithmetic assumes. The divergence
+        # is named as a limitation, not reconciled here.
+        forecasts = _as_list(payload)
+        created = []
+        for f in forecasts:
+            for field in ("area_uuid", "time_slot"):
+                if f.get(field) is None:
+                    raise HTTPException(status_code=400,
+                                        detail=f"{field} is required")
+            if not isinstance(f.get("energy_kwh"), (int, float)):
+                raise HTTPException(status_code=400,
+                                    detail="energy_kwh must be a number")
+            # `community_uuid` is optional here (the production schema carries
+            # it, the filter does not need it); a forecast stored without one
+            # is invisible to a community-filtered query.
+            created.append(store.upsert_forecast(f))
+        logger.info("stored %d forecast(s)", len(created))
         return created
 
     # --------------------------------------------------------- mock admin
@@ -245,7 +295,8 @@ def create_app(store: InMemoryStore | None = None) -> FastAPI:
                 "markets": len(store.markets),
                 "orders": len(store.orders),
                 "trades": len(store.trades),
-                "asset_measurements": len(store.measurements),
+                "measurements": len(store.measurements),
+                "forecasts": len(store.forecasts),
             },
         }
 

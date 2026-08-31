@@ -1,9 +1,10 @@
 """In-memory data store for the mock GSY-DEX off-chain database.
 
 Everything is volatile by design: restarting the service wipes all data.
-The store mirrors the four collections the real off-chain DB exposes
-(markets, orders, trades, asset measurements) keyed the same way the
-documented REST API queries them.
+The store mirrors the collections the real off-chain DB exposes (markets,
+orders, trades, measurements, forecasts) keyed the same way its REST API
+queries them (gsy-decentralized-exchange main @ aa99ea2,
+gsy-offchain-storage/src/startup.rs).
 """
 
 import hashlib
@@ -19,14 +20,17 @@ def blake2b_hash(data: dict) -> str:
 
 
 def generate_market_id(time_slot: int) -> str:
-    """blake2b-256 of "spot" + delivery timestamp bytes.
+    """blake2b-256 of the ASCII market type + the delivery timestamp.
 
     In production the Market Orchestrator generates this id; the mock does it
-    as a stand-in convenience when POST /market omits `market_id`.
-    TODO(confirm-with-supervisor): exact byte encoding of the timestamp
-    (assumed here: unsigned 64-bit little-endian).
+    as a stand-in convenience when POST /market omits `market_id`. The
+    preimage follows the orchestrator byte-for-byte
+    (gsy-decentralized-exchange main @ aa99ea2,
+    gsy-market-orchestrator/src/orchestrator.rs:85): the market type as ASCII
+    ("Spot", capitalised) followed by the timestamp as an unsigned 64-bit
+    big-endian integer.
     """
-    payload = b"spot" + struct.pack("<Q", int(time_slot))
+    payload = b"Spot" + struct.pack(">Q", int(time_slot))
     return "0x" + hashlib.blake2b(payload, digest_size=32).hexdigest()
 
 
@@ -44,6 +48,9 @@ class InMemoryStore:
         self.trades: dict[str, dict] = {}             # trade_uuid -> trade
         # (community_uuid, area_uuid, time_slot) -> measurement
         self.measurements: dict[tuple, dict] = {}
+        # Same key, second channel: what an area *expected* to deliver or
+        # consume, as opposed to what its meter recorded.
+        self.forecasts: dict[tuple, dict] = {}
 
     # ------------------------------------------------------------- markets
 
@@ -110,25 +117,58 @@ class InMemoryStore:
                   if market_id is None or t.get("market_id") == market_id]
         return sorted(result, key=lambda t: t.get("creation_time", 0))
 
-    # -------------------------------------------------------- measurements
+    # ------------------------------------------- measurements / forecasts
 
-    def upsert_measurement(self, m: dict) -> dict:
-        m.setdefault("creation_time", now_ts())
-        key = (m.get("community_uuid"), m.get("area_uuid"), m.get("time_slot"))
-        self.measurements[key] = m
-        return m
+    # Both channels carry one row per (community, area, slot) and are queried
+    # identically, so they share the store pattern below.
 
-    def query_measurements(self, community_uuid: str,
-                           area_uuid: str | None,
-                           time_slot: int | None) -> list[dict]:
+    @staticmethod
+    def _upsert_slot_row(collection: dict[tuple, dict], row: dict) -> dict:
+        row.setdefault("creation_time", now_ts())
+        key = (row.get("community_uuid"), row.get("area_uuid"),
+               row.get("time_slot"))
+        collection[key] = row
+        return row
+
+    @staticmethod
+    def _query_slot_rows(collection: dict[tuple, dict],
+                         community_uuid: str | None, area_uuid: str | None,
+                         start_time: int | None,
+                         end_time: int | None) -> list[dict]:
+        """Rows whose slot lies in [start_time, end_time], both ends
+        inclusive — the same convention `query_orders` uses, so a caller
+        asking for [t, t + Δ - 1] sees exactly one slot on every channel."""
         result = []
-        for (c_uuid, a_uuid, ts), m in self.measurements.items():
-            if c_uuid != community_uuid:
+        for (c_uuid, a_uuid, slot), row in collection.items():
+            if community_uuid is not None and c_uuid != community_uuid:
                 continue
             if area_uuid is not None and a_uuid != area_uuid:
                 continue
-            if time_slot is not None and ts != time_slot:
+            slot = slot or 0
+            if start_time is not None and slot < start_time:
                 continue
-            result.append(m)
-        return sorted(result, key=lambda m: (m.get("area_uuid") or "",
-                                             m.get("time_slot") or 0))
+            if end_time is not None and slot > end_time:
+                continue
+            result.append(row)
+        return sorted(result, key=lambda r: (r.get("area_uuid") or "",
+                                             r.get("time_slot") or 0))
+
+    def upsert_measurement(self, m: dict) -> dict:
+        return self._upsert_slot_row(self.measurements, m)
+
+    def query_measurements(self, community_uuid: str | None = None,
+                           area_uuid: str | None = None,
+                           start_time: int | None = None,
+                           end_time: int | None = None) -> list[dict]:
+        return self._query_slot_rows(self.measurements, community_uuid,
+                                     area_uuid, start_time, end_time)
+
+    def upsert_forecast(self, f: dict) -> dict:
+        return self._upsert_slot_row(self.forecasts, f)
+
+    def query_forecasts(self, community_uuid: str | None = None,
+                        area_uuid: str | None = None,
+                        start_time: int | None = None,
+                        end_time: int | None = None) -> list[dict]:
+        return self._query_slot_rows(self.forecasts, community_uuid,
+                                     area_uuid, start_time, end_time)

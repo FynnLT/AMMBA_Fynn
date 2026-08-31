@@ -24,7 +24,7 @@ def test_market_id_is_generated_when_missing(client):
     })
     assert resp.status_code == 201
     market = resp.json()
-    # blake2b-256 of "spot" + LE u64 timestamp, 0x-prefixed
+    # blake2b-256 of "Spot" + BE u64 timestamp, 0x-prefixed
     assert market["market_id"] == generate_market_id(1750000500)
     assert market["market_id"].startswith("0x")
     assert len(market["market_id"]) == 66
@@ -32,6 +32,19 @@ def test_market_id_is_generated_when_missing(client):
     got = client.get("/market", params={"market_id": market["market_id"]})
     assert got.status_code == 200
     assert got.json()["community_uuid"] == "communityid_1"
+
+
+def test_market_id_matches_the_gsy_preimage():
+    """Pinned against the Market Orchestrator's own derivation.
+
+    `blake2b(32, "Spot" ++ delivery_timestamp.to_be_bytes())`
+    (gsy-decentralized-exchange main @ aa99ea2,
+    gsy-market-orchestrator/src/orchestrator.rs:85). A drifting preimage
+    produces an id of the right shape and length, so only a fixed vector
+    catches it.
+    """
+    assert generate_market_id(1787580000) == (
+        "0x7d53efb681b8f8b96bbe2dfe257a886fe2193cefdc6181c48722c11723ab4749")
 
 
 def test_market_create_is_idempotent(client):
@@ -157,20 +170,75 @@ def test_trades_roundtrip_and_patch(client):
 def test_measurements_upsert_and_filter(client):
     m = {"community_uuid": "c1", "area_uuid": "a1", "time_slot": 900,
          "energy_kwh": 3.0}
-    client.post("/asset_measurements", json=m)
+    client.post("/measurements", json=m)
     # same key again -> overwrite, not duplicate
-    client.post("/asset_measurements", json={**m, "energy_kwh": 4.5})
-    client.post("/asset_measurements", json={**m, "area_uuid": "a2",
-                                             "energy_kwh": 1.0})
+    client.post("/measurements", json={**m, "energy_kwh": 4.5})
+    client.post("/measurements", json={**m, "area_uuid": "a2",
+                                       "energy_kwh": 1.0})
 
     all_for_community = client.get(
-        "/asset_measurements", params={"community_uuid": "c1"}).json()
+        "/measurements", params={"community_uuid": "c1"}).json()
     assert len(all_for_community) == 2
 
-    only_a1 = client.get("/asset_measurements", params={
+    only_a1 = client.get("/measurements", params={
         "community_uuid": "c1", "area_uuid": "a1"}).json()
     assert len(only_a1) == 1
     assert only_a1[0]["energy_kwh"] == 4.5
+
+
+def slot_rows(area: str) -> list[dict]:
+    """One row per slot boundary around the 900 s slot starting at 900."""
+    return [{"community_uuid": "c1", "area_uuid": area, "time_slot": slot,
+             "energy_kwh": float(slot)}
+            for slot in (899, 900, 1799, 1800)]
+
+
+@pytest.mark.parametrize("route", ["/measurements", "/forecasts"])
+def test_slot_window_is_inclusive_on_both_ends(client, route):
+    # The Execution Node asks for [t, t + Δ - 1]; the row at t + Δ belongs to
+    # the next slot and must stay out, exactly as on /orders.
+    for row in slot_rows("a1"):
+        assert client.post(route, json=row).status_code == 201
+
+    in_window = client.get(route, params={
+        "community_uuid": "c1", "start_time": 900, "end_time": 1799}).json()
+    assert [r["time_slot"] for r in in_window] == [900, 1799]
+
+
+def test_forecast_roundtrip_and_validation(client):
+    forecast = {"community_uuid": "c1", "area_uuid": "area-pv-a",
+                "time_slot": 900, "energy_kwh": 5.0, "confidence": 0.8}
+    resp = client.post("/forecasts", json=forecast)
+    assert resp.status_code == 201
+
+    stored = client.get("/forecasts", params={
+        "community_uuid": "c1", "area_uuid": "area-pv-a"}).json()
+    assert len(stored) == 1
+    # Positive kWh for a producer: the artifact keeps its own sign convention
+    # rather than GSY's (generation negative).
+    assert stored[0]["energy_kwh"] == 5.0
+    assert stored[0]["confidence"] == 0.8
+
+    # same key again -> upsert, like the measurement channel
+    client.post("/forecasts", json={**forecast, "energy_kwh": 6.0})
+    assert client.get("/forecasts", params={
+        "community_uuid": "c1"}).json()[0]["energy_kwh"] == 6.0
+
+    bad = dict(forecast, energy_kwh="lots")
+    assert client.post("/forecasts", json=bad).status_code == 400
+    del bad["area_uuid"]
+    assert client.post("/forecasts", json=bad).status_code == 400
+
+
+def test_forecasts_and_measurements_are_separate_channels(client):
+    row = {"community_uuid": "c1", "area_uuid": "a1", "time_slot": 900}
+    client.post("/measurements", json={**row, "energy_kwh": 3.0})
+    client.post("/forecasts", json={**row, "energy_kwh": 5.0})
+
+    assert client.get("/measurements", params={
+        "community_uuid": "c1"}).json()[0]["energy_kwh"] == 3.0
+    assert client.get("/forecasts", params={
+        "community_uuid": "c1"}).json()[0]["energy_kwh"] == 5.0
 
 
 def test_reset(client):

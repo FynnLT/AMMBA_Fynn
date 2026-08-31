@@ -1,11 +1,15 @@
 """End-to-end clearing cycle against an in-memory fake off-chain DB
 (guide §9 step 5: mock DB responses, run full cycle, assert trades)."""
 
+import httpx
 import pytest
+from fastapi import Body, FastAPI, Query
+from fastapi.responses import JSONResponse
 
 from src.clearing import run_clearing
 from src.config import Config
-from src.contract import MockContractClient
+from src.contract import ContractError, MockContractClient
+from src.offchain_db import OffchainDBClient
 
 MARKET = "0x" + "aa" * 32
 COMMUNITY = "communityid_1"
@@ -276,3 +280,132 @@ async def test_trigger_sigmoid_param_overrides(cfg):
     # ratio 1.0 == theta -> band center of the OVERRIDDEN band
     assert result["clearing_price_ct_per_kwh"] == pytest.approx(25.0)
     assert result["sigmoid_params"]["k_upper"] == 40.0
+
+
+# ------------------------------------------- off-chain DB without PATCH
+
+def db_without_patch(orders: list[dict], status_code: int) -> FastAPI:
+    """A DB that serves orders and trades but rejects status updates.
+
+    The production off-chain storage registers no PATCH route, so this is
+    what the Clearing Node meets when `OFFCHAIN_DB_URL` points at the real
+    service.
+    """
+    app = FastAPI()
+    app.state.trades = []
+    by_id = {o["order_id"]: o for o in orders}
+
+    @app.get("/orders")
+    async def get_orders(market_id: str = Query(...),
+                         start_time: int | None = Query(default=None),
+                         end_time: int | None = Query(default=None)) -> list:
+        return [o for o in by_id.values()
+                if o["market_id"] == market_id
+                and (start_time is None or o["time_slot"] >= start_time)
+                and (end_time is None or o["time_slot"] <= end_time)]
+
+    @app.get("/trades")
+    async def get_trades(market_id: str | None = Query(default=None)) -> list:
+        return [t for t in app.state.trades if t["market_id"] == market_id]
+
+    @app.post("/trades-normalized", status_code=201)
+    async def post_trades(payload: list = Body(...)) -> list:
+        app.state.trades.extend(payload)
+        return payload
+
+    @app.patch("/orders/{order_id}")
+    async def patch_order(order_id: str):
+        return JSONResponse(status_code=status_code,
+                            content={"detail": "no such route"})
+
+    return app
+
+
+@pytest.mark.parametrize("status_code", [404, 405])
+@pytest.mark.anyio
+async def test_clearing_survives_a_db_without_a_patch_route(cfg, status_code):
+    app = db_without_patch(demand_limited_orders(), status_code)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                               base_url="http://offchain-db")
+    db = OffchainDBClient("http://offchain-db", client=client)
+
+    result = await run_clearing(trigger(), cfg, db, MockContractClient())
+
+    # Identical to the run against a DB that accepts the PATCH: only the
+    # order-status side effect is missing.
+    assert result["status"] == "cleared"
+    assert result["clearing_price_ct_per_kwh"] == pytest.approx(15.147225)
+    assert result["traded_quantity_kwh"] == pytest.approx(10.0)
+    assert result["num_trades"] == 6
+    for producer in result["allocations"]["producers"]:
+        assert producer["fill_rate"] == pytest.approx(0.8)
+    assert len(app.state.trades) == 6
+
+    await db.close()
+    await client.aclose()
+
+
+# --------------------------------------------- recovery from a lost anchor
+
+@pytest.mark.anyio
+async def test_recovers_when_the_anchor_outlived_the_trade_write_back(cfg):
+    """`clearMarket` succeeded, `post_trades` did not.
+
+    The slot then holds an anchor but no trades, so a re-trigger passes the
+    idempotency check, clears again, and the contract reverts. Before the
+    recovery that meant a 502 for that slot forever.
+    """
+    chain = MockContractClient()
+    db = FakeOffchainDB(demand_limited_orders())
+
+    first = await run_clearing(trigger(), cfg, db, chain)
+    assert first["recovered_from_anchor"] is False
+
+    # the write-back is lost; the on-chain anchor survives
+    db.trades = []
+    for order_ in db.orders.values():
+        order_["status"] = "Open"
+
+    recovered = await run_clearing(trigger(), cfg, db, chain)
+
+    assert recovered["status"] == "cleared"
+    assert recovered["recovered_from_anchor"] is True
+    # the original anchor, not a second one
+    assert recovered["tx_hash"] == first["tx_hash"]
+    assert len(chain.records) == 1
+    assert recovered["clearing_price_ct_per_kwh"] == pytest.approx(15.147225)
+    # and the write-back this time succeeded
+    assert len(db.trades) == 6
+    assert all(t["parameters"]["amm_tx_hash"] == first["tx_hash"]
+               for t in db.trades)
+
+
+@pytest.mark.anyio
+async def test_other_contract_reverts_still_fail_the_run(cfg):
+    """A bounds-check failure or an unauthorised caller must fail loudly."""
+
+    class RejectingChain(MockContractClient):
+        async def clear_market(self, **kwargs):
+            raise ContractError("AMMBA: clearing price out of bounds")
+
+    db = FakeOffchainDB(demand_limited_orders())
+    with pytest.raises(ContractError, match="out of bounds"):
+        await run_clearing(trigger(), cfg, db, RejectingChain())
+    # nothing was written on the way out
+    assert db.trades == []
+
+
+@pytest.mark.anyio
+async def test_a_duplicate_revert_without_an_anchor_still_raises(cfg):
+    """Nothing to recover from means the original error stands."""
+
+    class AmnesiacChain(MockContractClient):
+        async def clear_market(self, **kwargs):
+            raise ContractError("AMMBA: market already cleared: x")
+
+        async def get_clearing_result(self, market_id):
+            return None
+
+    db = FakeOffchainDB(demand_limited_orders())
+    with pytest.raises(ContractError, match="already cleared"):
+        await run_clearing(trigger(), cfg, db, AmnesiacChain())

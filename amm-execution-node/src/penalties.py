@@ -9,12 +9,9 @@ Three penalty types from the simulation specification:
 * Buyer externality  (demand-limited rounds): a buyer who underreported
   demand lowered the price for all sellers.
 
-PoC interpretation (single smart-meter value per participant):
-the measured value serves both as `actual_delivered` (shortfall check,
-measured < traded) and as `actual_deliverable` / `actual_demand`
-(withholding/underreporting check, measured > traded).
-TODO(confirm-with-supervisor): whether "deliverable" capacity should come
-from a separate forecast/nameplate source instead of the meter reading.
+`actual_delivered` and the buyer's `actual_demand` are the meter reading;
+`actual_deliverable` comes from the forecast channel (`GET /forecasts`) and
+falls back to the meter reading where a slot carries no forecast.
 """
 
 from src.sigmoid import sigmoid_price

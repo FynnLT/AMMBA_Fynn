@@ -23,6 +23,7 @@ from src.clearing import run_clearing
 from src.config import Config, PreferenceConfigError, load_config
 from src.contract import BaseContractClient, ContractError, build_contract_client
 from src.offchain_db import OffchainDBClient, OffchainDBError
+from src.preferences import AllocationError
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -111,6 +112,14 @@ def create_app(cfg: Config | None = None,
     async def contract_error(_request: Request, exc: ContractError):
         logger.error("contract failure: %s", exc)
         return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+    # The conservation invariant failing is a bug in this service, not a bad
+    # request and not an upstream outage — but it answers with a defined
+    # error rather than an unhandled AssertionError.
+    @app.exception_handler(AllocationError)
+    async def allocation_error(_request: Request, exc: AllocationError):
+        logger.error("allocation invariant violated: %s", exc)
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
 
     # An unusable preference override is a client error, not an outage.
     @app.exception_handler(PreferenceConfigError)

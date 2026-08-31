@@ -11,12 +11,12 @@ import asyncio
 import logging
 
 from src.config import Config, resolve_community, resolve_preferences
-from src.contract import BaseContractClient
+from src.contract import BaseContractClient, ContractError
 from src.offchain_db import OffchainDBClient
 from src.preferences import (GREY, MIXED, MultiplierResult,
                              apply_energy_type_multipliers,
                              apply_preference_allocation, bonus_scale)
-from src.sigmoid import clamp_price, sigmoid_price
+from src.sigmoid import clamp_price, sigmoid_price, to_node_int
 from src.trade_builder import build_all_trades, rehash_trade
 
 logger = logging.getLogger("amm-clearing-node.clearing")
@@ -31,6 +31,11 @@ BALANCED = "BALANCED"
 _EPSILON = 1e-9
 
 _SIGMOID_PARAM_KEYS = ("k_upper", "k_lower", "theta", "steepness")
+
+# The contract's revert when a market already carries an anchor. Matching on
+# the reason string is what the chain offers: web3 surfaces it as text, and
+# MockContractClient mirrors the same wording.
+_ALREADY_CLEARED = "already cleared"
 
 
 def round_type(total_supply_kwh: float, total_demand_kwh: float) -> str:
@@ -222,9 +227,64 @@ def _summary_from_existing_trades(trades: list[dict], market_id: str,
         producers=producers, consumers=consumers, trades=trades,
         preferences=_preferences_from_trades(trades, pool_id, clearing_price),
         status="already_cleared",
+        recovered_from_anchor=False,
         message="trades already exist for this market_id + time_slot; "
                 "clearing is idempotent and was not re-run",
     )
+
+
+async def _anchor_or_recover(chain: BaseContractClient, *, market_id: str,
+                             community_uuid: str, time_slot: int,
+                             total_supply_kwh: float, total_demand_kwh: float,
+                             clearing_price: float) -> tuple[str, float, bool]:
+    """Anchor the clearing on-chain, or continue from an anchor that exists.
+
+    The failure this recovers from: `clearMarket` succeeded but `post_trades`
+    then failed, leaving the slot with an anchor and no trades. A re-trigger
+    finds no trades, clears again, and the contract reverts "already cleared"
+    — so without this the endpoint answers 502 for that slot forever and it
+    takes manual intervention to settle. Reading the stored anchor lets the
+    trade write-back be retried against the original result.
+
+    Only that one revert is recovered from. A bounds-check failure or an
+    unauthorised caller still propagates and fails the run loudly.
+
+    Returns `(tx_hash, clearing_price, recovered)`.
+    """
+    try:
+        tx_hash = await chain.clear_market(
+            market_id=market_id, community_uuid=community_uuid,
+            time_slot=time_slot, total_supply_kwh=total_supply_kwh,
+            total_demand_kwh=total_demand_kwh, clearing_price=clearing_price)
+        return tx_hash, clearing_price, False
+    except ContractError as exc:
+        if _ALREADY_CLEARED not in str(exc):
+            raise
+        anchor = await chain.get_clearing_result(market_id)
+        if anchor is None:
+            # The chain rejected the clearing as a duplicate but has no result
+            # to offer: nothing to recover from, so the original error stands.
+            raise
+
+    # Compared in the anchor's own precision, not as floats: the contract
+    # stores the price scaled by 10,000, so reading it back yields 15.1472
+    # where the clearing computed 15.147225. Both anchor the same on-chain
+    # integer, and the recomputed value is the one every downstream stage
+    # rebuilds its counterfactuals from — keeping it is what makes a
+    # recovered slot settle identically to a first-time one.
+    anchored_price = anchor["clearing_price"]
+    price = clearing_price
+    if to_node_int(anchored_price) != to_node_int(clearing_price):
+        # A real divergence: the order book changed between the anchor and
+        # this retry. The committed anchor wins, at the precision it holds.
+        logger.warning("market %s is anchored at %.6f ct/kWh but this run "
+                       "computed %.6f — settling on the anchored price",
+                       market_id, anchored_price, clearing_price)
+        price = anchored_price
+    logger.warning("market %s already anchored on-chain (tx %s) but carries "
+                   "no trades — recovering the anchor and retrying the trade "
+                   "write-back", market_id, anchor["tx_hash"])
+    return anchor["tx_hash"], price, True
 
 
 async def _expire_one_sided_market(db: OffchainDBClient, open_orders: list[dict],
@@ -311,8 +371,8 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
 
     # ---- Step 4: record on-chain (must succeed before trades are written,
     #      guide §4.7) ----------------------------------------------------
-    tx_hash = await chain.clear_market(
-        market_id=market_id, community_uuid=community_uuid,
+    tx_hash, clearing_price, recovered = await _anchor_or_recover(
+        chain, market_id=market_id, community_uuid=community_uuid,
         time_slot=time_slot, total_supply_kwh=total_supply_kwh,
         total_demand_kwh=total_demand_kwh, clearing_price=clearing_price)
 
@@ -371,6 +431,9 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
         preferences={**allocation.as_dict(preferences),
                      "multipliers": multipliers.as_dict()},
         status="cleared",
+        # Explicit, so a caller can tell a first clearing from one that
+        # continued an anchor left behind by a failed write-back.
+        recovered_from_anchor=recovered,
         community_name=trigger.get("community_name"),
         blockchain_mode=chain.mode,
     )

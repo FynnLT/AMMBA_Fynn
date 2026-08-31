@@ -36,6 +36,14 @@ from src.config import PreferenceConfig
 
 logger = logging.getLogger("amm-clearing-node.preferences")
 
+
+class AllocationError(RuntimeError):
+    """Raised when an allocation violates the conservation invariant.
+
+    A defined domain error rather than a bare `AssertionError`, so the service
+    answers with a handled response instead of an unhandled traceback.
+    """
+
 # Same tolerance as clearing.round_type: allocation arithmetic introduces
 # float noise, so exact comparisons would misfire.
 EPSILON = 1e-9
@@ -283,8 +291,9 @@ def _check_balance(bids: list[dict], offers: list[dict],
     if not ok:
         logger.error("allocation invariant violated: bids=%.9f offers=%.9f "
                      "traded=%.9f", bought, sold, traded_quantity)
-    assert ok, (f"allocation must balance: bids={bought} offers={sold} "
-                f"traded={traded_quantity}")
+        raise AllocationError(
+            f"allocation must balance: bids={bought} offers={sold} "
+            f"traded={traded_quantity}")
 
 
 def apply_preference_allocation(

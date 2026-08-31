@@ -1,11 +1,13 @@
 """AMM Execution Node cycle (guide §5).
 
-After the delivery period, fetch settled trades + smart-meter measurements,
-compute deviation penalties and write the results back to the off-chain DB.
+After the delivery period, fetch settled trades plus the two measurement
+channels — meter readings (`/measurements`) for what was delivered and
+forecasts (`/forecasts`) for what could have been delivered — compute
+deviation penalties and write the results back to the off-chain DB.
 
 The clearing result (totals, price, sigmoid parameters) is recovered entirely
-from the trade objects' `parameters` field — the Execution Node is
-self-contained from trades + measurements alone (guide §5.4).
+from the trade objects' `parameters` field, so the Execution Node is
+self-contained from trades + measurements alone (author's decision).
 """
 
 import asyncio
@@ -13,7 +15,7 @@ import logging
 import time
 
 from src.config import Config
-from src.offchain_db import OffchainDBClient
+from src.offchain_db import OffchainDBClient, OffchainDBError
 from src.penalties import (BALANCED, DEMAND_LIMITED, SUPPLY_LIMITED,
                            buyer_externality_penalty, determine_round_type,
                            seller_externality_penalty,
@@ -23,8 +25,10 @@ logger = logging.getLogger("amm-execution-node.execution")
 
 _POOL_PREFIX = "AMM_POOL_"
 
-# Result-row fields written back into trade `parameters` (guide §7.5 TBD).
-_PENALTY_PARAM_KEYS = ("actual_kwh", "measurement_found", "shortfall_kwh",
+# Result-row fields written back into trade `parameters` (output schema TBD,
+# see `OffchainDBClient.update_trade`).
+_PENALTY_PARAM_KEYS = ("actual_kwh", "measurement_found", "deliverable_kwh",
+                       "deliverable_source", "shortfall_kwh",
                        "shortfall_penalty_ct", "externality_kwh",
                        "externality_penalty_ct", "total_penalty_ct")
 
@@ -114,8 +118,22 @@ async def run_execution(trigger: dict, cfg: Config,
     traded_quantity = min(total_supply, total_demand)
     round_kind = determine_round_type(total_supply, total_demand)
 
-    measurements = await db.get_measurements(community_uuid, time_slot=time_slot)
+    measurements = await db.get_measurements(community_uuid, time_slot,
+                                             cfg.time_slot_sec)
     actual_by_area = {m["area_uuid"]: float(m["energy_kwh"]) for m in measurements}
+
+    # Second channel, and an optional one: a slot without forecasts is the
+    # normal case, and a DB that does not serve the route at all must not
+    # fail the run. Either way the penalties fall back to the meter reading.
+    try:
+        forecasts = await db.get_forecasts(community_uuid, time_slot,
+                                           cfg.time_slot_sec)
+    except OffchainDBError as exc:
+        logger.warning("forecast channel unavailable (%s) — falling back to "
+                       "meter readings for deliverable capacity", exc)
+        forecasts = []
+    deliverable_by_area = {f["area_uuid"]: float(f["energy_kwh"])
+                           for f in forecasts if f.get("energy_kwh") is not None}
 
     results = []
     total_penalties = 0.0
@@ -135,8 +153,20 @@ async def run_execution(trigger: dict, cfg: Config,
                            time_slot)
             actual = participant["traded_kwh"]
 
+        # The externality penalty asks what the seller *could* have delivered.
+        # With only a meter reading, delivered == deliverable by construction
+        # and a successful withholder is invisible (issue #13). A separate
+        # forecast channel is what makes the penalty measurable — and it is
+        # manipulable by the party it is used to penalise, which is stated as
+        # a limitation rather than fixed. Recorded on every row for the
+        # harness; only the seller path reads it.
+        forecast = deliverable_by_area.get(participant["area_uuid"])
+        deliverable = actual if forecast is None else forecast
+
         row = {**participant, "actual_kwh": round(actual, 6),
                "measurement_found": measurement_found,
+               "deliverable_kwh": round(deliverable, 6),
+               "deliverable_source": "meter" if forecast is None else "forecast",
                "trade_uuid": trade.get("trade_uuid"),
                "shortfall_kwh": 0.0, "shortfall_penalty_ct": 0.0,
                "externality_kwh": 0.0, "externality_penalty_ct": 0.0,
@@ -151,9 +181,9 @@ async def run_execution(trigger: dict, cfg: Config,
 
             if round_kind == SUPPLY_LIMITED:
                 _apply_externality(row, seller_externality_penalty(
-                    participant["traded_kwh"], actual, cfg.penalty_eta_kwh,
-                    total_supply, total_demand, traded_quantity,
-                    clearing_price, sigmoid), "withheld_kwh")
+                    participant["traded_kwh"], deliverable,
+                    cfg.penalty_eta_kwh, total_supply, total_demand,
+                    traded_quantity, clearing_price, sigmoid), "withheld_kwh")
         elif round_kind == DEMAND_LIMITED:  # buyer
             _apply_externality(row, buyer_externality_penalty(
                 participant["reported_kwh"], actual, total_supply,
@@ -166,8 +196,7 @@ async def run_execution(trigger: dict, cfg: Config,
         results.append(row)
 
         # Write penalties back: trade `parameters` is extended and the trade
-        # is marked Executed ("energy delivery verified", guide §2).
-        # TODO(confirm-with-supervisor): penalty output schema (guide §7.5).
+        # is marked Executed ("energy delivery verified").
         # NOTE: re-triggering recomputes and overwrites — handy for demos;
         # production idempotency policy TBD.
         writes.append(db.update_trade(

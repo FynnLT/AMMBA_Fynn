@@ -22,7 +22,8 @@ from src.clearing import run_clearing
 from src.config import (Config, PreferenceConfig, PreferenceConfigError,
                         load_config, resolve_preferences)
 from src.contract import MockContractClient
-from src.preferences import (apply_preference_allocation, parse_energy_type,
+from src.preferences import (AllocationError, _check_balance,
+                             apply_preference_allocation, parse_energy_type,
                              parse_preferred_partner)
 
 from .test_clearing import MARKET, SLOT, FakeOffchainDB, trigger
@@ -652,6 +653,21 @@ async def test_idempotent_retrigger_rebuilds_the_same_preferences_block(
     assert producers["Battery"]["energy_type"] == "grey"
 
 
+# ------------------------------------------------ conservation invariant
+
+def test_balance_check_raises_a_defined_error():
+    """A bare AssertionError left the service answering an unhandled 500."""
+    bids = [{"allocated_energy": 4.0}]
+    offers = [{"allocated_energy": 10.0}]
+    with pytest.raises(AllocationError, match="allocation must balance"):
+        _check_balance(bids, offers, traded_quantity=10.0)
+
+
+def test_balance_check_accepts_a_balanced_allocation():
+    rows = [{"allocated_energy": 10.0}]
+    _check_balance(rows, list(rows), traded_quantity=10.0)  # no raise
+
+
 # --------------------------------------------- §6.7 execution-node regression
 
 _EXECUTION_DIR = Path(__file__).resolve().parents[2] / "amm-execution-node"
@@ -672,8 +688,15 @@ class FakeDB:
     async def get_trades(self, market_id):
         return payload["trades"]
 
-    async def get_measurements(self, community_uuid, time_slot=None):
+    async def get_measurements(self, community_uuid, time_slot,
+                               time_slot_sec, area_uuid=None):
         return payload["measurements"]
+
+    async def get_forecasts(self, community_uuid, time_slot, time_slot_sec,
+                            area_uuid=None):
+        # No forecast channel in this regression: the penalties fall back to
+        # the meter, exactly as before the second channel existed.
+        return []
 
     async def update_trade(self, trade_uuid, *, status=None, parameters=None):
         return {}

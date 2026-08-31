@@ -35,7 +35,7 @@ def main() -> int:
     parser.add_argument("--community", default=None,
                         help="community_uuid to clear for; must be registered "
                              "on-chain in live mode (default: generated)")
-    # market_id is blake2b("spot" + time_slot), so the delivery slot alone
+    # market_id is blake2b("Spot" + time_slot), so the delivery slot alone
     # determines it: two runs in the same 15-minute window collide. Vary this
     # to get a distinct market_id per run.
     parser.add_argument("--slot-offset", type=int, default=4,
@@ -165,7 +165,7 @@ def main() -> int:
                      "time_slot": time_slot, "energy_kwh": kwh}
                     for area, kwh in {**perfect, "area-pv-a": 3.0,
                                       "area-bakery": 4.5}.items()]
-    call("POST", args.db, "/asset_measurements", json=measurements)
+    call("POST", args.db, "/measurements", json=measurements)
 
     execution = call("POST", args.execution, "/trigger-execution", json={
         "market_id": market_id, "community_uuid": community,

@@ -54,6 +54,23 @@ AMMBA_ABI = [
         ],
     },
     {
+        # Needed only to recover the anchor's transaction hash: the contract
+        # stores the clearing result but not the hash of the transaction that
+        # wrote it.
+        "type": "event",
+        "name": "MarketCleared",
+        "anonymous": False,
+        "inputs": [
+            {"name": "market_id", "type": "bytes32", "indexed": True},
+            {"name": "community_uuid", "type": "bytes32", "indexed": True},
+            {"name": "time_slot", "type": "uint256", "indexed": False},
+            {"name": "total_supply", "type": "uint256", "indexed": False},
+            {"name": "total_demand", "type": "uint256", "indexed": False},
+            {"name": "clearing_price", "type": "uint256", "indexed": False},
+            {"name": "block_timestamp", "type": "uint256", "indexed": False},
+        ],
+    },
+    {
         "type": "function",
         "name": "getClearingResult",
         "stateMutability": "view",
@@ -100,6 +117,14 @@ class BaseContractClient:
         a node computing prices from different values would still pass the
         contract's bounds check, so the anchor alone does not prove the price
         came from the agreed parameters.
+        """
+        raise NotImplementedError
+
+    async def get_clearing_result(self, market_id: str) -> dict | None:
+        """The anchor a market already carries, or None if it has none.
+
+        Read after a "market already cleared" revert, to continue from the
+        stored anchor instead of failing the slot permanently.
         """
         raise NotImplementedError
 
@@ -156,6 +181,18 @@ class MockContractClient(BaseContractClient):
         """
         logger.debug("MOCK getCommunityParams(%s): no chain to verify "
                      "against, accepting local parameters", community_uuid)
+
+    async def get_clearing_result(self, market_id: str) -> dict | None:
+        record = self.records.get(market_id)
+        if record is None:
+            return None
+        return {
+            "time_slot": record["time_slot"],
+            "total_supply_kwh": from_node_int(record["total_supply"]),
+            "total_demand_kwh": from_node_int(record["total_demand"]),
+            "clearing_price": from_node_int(record["clearing_price"]),
+            "tx_hash": record["tx_hash"],
+        }
 
 
 class Web3ContractClient(BaseContractClient):
@@ -250,16 +287,67 @@ class Web3ContractClient(BaseContractClient):
                     to_node_int(local.theta), to_node_int(local.steepness))
         if tuple(on_chain) != expected:
             names = ("k_upper", "k_lower", "theta", "steepness")
+            # Only the fields that actually differ: listing all four printed
+            # "on-chain 28.5 != local 28.5" for matching values and buried
+            # the one that diverged.
             detail = ", ".join(
                 f"{name}: on-chain {from_node_int(chain_value)} != "
                 f"local {from_node_int(local_value)}"
                 for name, chain_value, local_value
-                in zip(names, on_chain, expected))
+                in zip(names, on_chain, expected)
+                if chain_value != local_value)
             raise ContractError(
                 f"on-chain community parameters for {community_uuid} differ "
                 f"from the local configuration ({detail})")
         logger.info("community %s: on-chain parameters match local config",
                     community_uuid)
+
+    async def get_clearing_result(self, market_id: str) -> dict | None:
+        return await asyncio.to_thread(self._get_clearing_result_sync,
+                                       market_id)
+
+    def _get_clearing_result_sync(self, market_id: str) -> dict | None:
+        market_key = hex_str_to_bytes32(market_id)
+        try:
+            time_slot, supply, demand, price =                 self._contract.functions.getClearingResult(market_key).call()
+        except Exception as exc:  # noqa: BLE001 - normalize all web3 failures
+            # The contract reverts "AMMBA: unknown market" for a market that
+            # carries no anchor; the caller treats None as "nothing to
+            # recover" and re-raises its original error.
+            logger.warning("getClearingResult(%s) failed: %s", market_id, exc)
+            return None
+        return {
+            "time_slot": int(time_slot),
+            "total_supply_kwh": from_node_int(supply),
+            "total_demand_kwh": from_node_int(demand),
+            "clearing_price": from_node_int(price),
+            "tx_hash": self._market_cleared_tx_hash(market_key),
+        }
+
+    def _market_cleared_tx_hash(self, market_key: bytes) -> str | None:
+        """Transaction hash of an existing anchor, read from its event.
+
+        The contract stores the clearing result but not the hash of the
+        transaction that wrote it, so the original hash is only recoverable
+        from the `MarketCleared` log. A node that prunes logs or refuses the
+        block range yields nothing; the recovery is still valid without the
+        hash, so this degrades to None rather than failing the run.
+        """
+        event = self._contract.events.MarketCleared()
+        filters = {"market_id": market_key}
+        try:
+            try:
+                logs = event.get_logs(argument_filters=filters, from_block=0)
+            except TypeError:
+                # web3 v6 spells the block bound fromBlock.
+                logs = event.get_logs(argument_filters=filters, fromBlock=0)
+        except Exception as exc:  # noqa: BLE001 - log availability is optional
+            logger.warning("could not read the MarketCleared log for the "
+                           "existing anchor: %s", exc)
+            return None
+        if not logs:
+            return None
+        return "0x" + bytes(logs[-1]["transactionHash"]).hex()
 
     def _clear_market_sync(self, market_id: str, community_uuid: str,
                            time_slot: int, total_supply_kwh: float,

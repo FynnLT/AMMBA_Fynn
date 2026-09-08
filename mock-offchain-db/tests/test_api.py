@@ -246,3 +246,33 @@ def test_reset(client):
     client.post("/reset")
     assert client.get("/community-market",
                       params={"community_uuid": "c1"}).json() == []
+
+
+def test_forecast_without_community_uuid_is_rejected(client):
+    """Issue #27: a row no query can return is worse than a rejected write.
+
+    The Execution Node queries this channel with a community filter, so a
+    forecast stored without a `community_uuid` is present and invisible — and
+    the failure is not an error but the silent fallback `deliverable =
+    actual`: `W_sell = 0` for every seller, withholding undetectable, and the
+    run comes back empty while looking entirely normal.
+    """
+    forecast = {"area_uuid": "area-pv-a", "time_slot": 900, "energy_kwh": 5.0}
+
+    resp = client.post("/forecasts", json=forecast)
+    assert resp.status_code == 400
+    assert "community_uuid" in resp.json()["detail"]
+
+    # nothing was stored on the way out
+    assert client.get("/forecasts").json() == []
+
+
+def test_forecast_with_community_uuid_is_returned_by_a_filtered_get(client):
+    forecast = {"community_uuid": "c1", "area_uuid": "area-pv-a",
+                "time_slot": 900, "energy_kwh": 5.0}
+    assert client.post("/forecasts", json=forecast).status_code == 201
+
+    stored = client.get("/forecasts", params={"community_uuid": "c1"}).json()
+    assert len(stored) == 1
+    assert stored[0]["area_uuid"] == "area-pv-a"
+    assert stored[0]["energy_kwh"] == 5.0

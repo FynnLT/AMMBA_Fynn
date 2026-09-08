@@ -263,16 +263,21 @@ def create_app(store: InMemoryStore | None = None) -> FastAPI:
         forecasts = _as_list(payload)
         created = []
         for f in forecasts:
-            for field in ("area_uuid", "time_slot"):
+            # DELIBERATE DIVERGENCE (issue #27): GSY's `ForecastSchema` carries
+            # `community_uuid` but does not enforce it; the mock does. The
+            # Execution Node queries this channel with a community filter, so a
+            # row stored without one is present and invisible — and the failure
+            # is not an error but the silent fallback `deliverable = actual`,
+            # which makes withholding undetectable while the run looks normal.
+            # A rejected write is worse than nothing only if nothing were the
+            # alternative; here the alternative is a row no query can return.
+            for field in ("community_uuid", "area_uuid", "time_slot"):
                 if f.get(field) is None:
                     raise HTTPException(status_code=400,
                                         detail=f"{field} is required")
             if not isinstance(f.get("energy_kwh"), (int, float)):
                 raise HTTPException(status_code=400,
                                     detail="energy_kwh must be a number")
-            # `community_uuid` is optional here (the production schema carries
-            # it, the filter does not need it); a forecast stored without one
-            # is invisible to a community-filtered query.
             created.append(store.upsert_forecast(f))
         logger.info("stored %d forecast(s)", len(created))
         return created

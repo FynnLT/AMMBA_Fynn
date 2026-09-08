@@ -2,7 +2,7 @@
 # Environment variables always override these values:
 #   OFFCHAIN_DB_URL, TIME_SLOT_SEC, EXECUTION_OFFSET_MIN,
 #   POLLING_INTERVAL_SEC, POLLING_ENABLED, PENALTY_GAMMA,
-#   PENALTY_TOLERANCE_KWH, HOST, PORT
+#   PENALTY_TOLERANCE_KWH, PENALTY_ETA_RELATIVE, HOST, PORT
 
 application:
   host: "0.0.0.0"
@@ -22,4 +22,8 @@ execution:
 
 penalty:
   gamma: 1.1                    # K_sho = gamma * K_upper  (gamma > 1)
-  eta_tolerance_kwh: 0.0        # shortfall tolerance threshold
+  eta_tolerance_kwh: 0.0        # shortfall tolerance threshold, absolute kWh
+  # eta relative to the trade's own quantity (D-26/D-44), in [0.0, 1.0).
+  # Unset keeps the absolute key above, which reproduces the runs recorded
+  # before 09/2026; set it to sweep eta independently of installation size.
+  eta_relative:                 # e.g. 0.05 for a 5 % deadband

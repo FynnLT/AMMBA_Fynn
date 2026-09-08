@@ -18,7 +18,7 @@ from src.config import Config
 from src.offchain_db import OffchainDBClient, OffchainDBError
 from src.penalties import (BALANCED, DEMAND_LIMITED, SUPPLY_LIMITED,
                            buyer_externality_penalty, determine_round_type,
-                           seller_externality_penalty,
+                           redistribution, seller_externality_penalty,
                            seller_shortfall_penalty)
 
 logger = logging.getLogger("amm-execution-node.execution")
@@ -132,8 +132,20 @@ async def run_execution(trigger: dict, cfg: Config,
         logger.warning("forecast channel unavailable (%s) — falling back to "
                        "meter readings for deliverable capacity", exc)
         forecasts = []
-    deliverable_by_area = {f["area_uuid"]: float(f["energy_kwh"])
-                           for f in forecasts if f.get("energy_kwh") is not None}
+    # GSY's ForecastSchema.energy_kwh is signed — the community client writes a
+    # seller's forecast as -energy — while this artifact keeps kWh positive on
+    # both channels. Reading the magnitude is correct under either convention;
+    # the warning makes the ambiguity visible instead of silent (issue #32).
+    forecast_rows = [f for f in forecasts if f.get("energy_kwh") is not None]
+    negative = [f["area_uuid"] for f in forecast_rows
+                if float(f["energy_kwh"]) < 0.0]
+    if negative:
+        logger.warning("forecast channel returned %d negative value(s) for "
+                       "slot %s (areas: %s) — reading the magnitude; GSY's "
+                       "ForecastSchema is signed, this artifact is not",
+                       len(negative), time_slot, ", ".join(map(str, negative)))
+    deliverable_by_area = {f["area_uuid"]: abs(float(f["energy_kwh"]))
+                           for f in forecast_rows}
 
     results = []
     total_penalties = 0.0
@@ -172,17 +184,24 @@ async def run_execution(trigger: dict, cfg: Config,
                "externality_kwh": 0.0, "externality_penalty_ct": 0.0,
                "counterfactual_price_ct_per_kwh": None}
 
+        # η is configured relative to the trade's own quantity (D-26/D-44): an
+        # absolute deadband makes the penalty a function of installation size —
+        # 0.5 kWh is 50 % of a 1 kWh trade and 2.5 % of a 20 kWh one. The absolute
+        # key stays as a fallback so runs recorded before 09/2026 reproduce.
+        eta = (cfg.penalty_eta_relative * participant["traded_kwh"]
+               if cfg.penalty_eta_relative is not None else cfg.penalty_eta_kwh)
+
         if participant["role"] == "seller":
             shortfall = seller_shortfall_penalty(
                 participant["traded_kwh"], actual, sigmoid["k_upper"],
-                cfg.penalty_gamma, cfg.penalty_eta_kwh)
+                cfg.penalty_gamma, eta)
             row["shortfall_kwh"] = shortfall["shortfall_kwh"]
             row["shortfall_penalty_ct"] = shortfall["penalty_ct"]
 
             if round_kind == SUPPLY_LIMITED:
                 _apply_externality(row, seller_externality_penalty(
                     participant["traded_kwh"], deliverable,
-                    cfg.penalty_eta_kwh, total_supply, total_demand,
+                    eta, total_supply, total_demand,
                     traded_quantity, clearing_price, sigmoid), "withheld_kwh")
         elif round_kind == DEMAND_LIMITED:  # buyer
             _apply_externality(row, buyer_externality_penalty(
@@ -222,11 +241,22 @@ async def run_execution(trigger: dict, cfg: Config,
         "total_demand_kwh": total_demand,
         "traded_quantity_kwh": round(traded_quantity, 6),
         "sigmoid_params": sigmoid,
+        # Both η keys are reported, so a run is identifiable from its own
+        # output rather than from the configuration it was started with.
         "penalty_params": {"gamma": cfg.penalty_gamma,
                            "eta_kwh": cfg.penalty_eta_kwh,
+                           "eta_relative": cfg.penalty_eta_relative,
+                           "eta_mode": ("relative"
+                                        if cfg.penalty_eta_relative is not None
+                                        else "absolute"),
                            "k_sho_ct_per_kwh": round(
                                cfg.penalty_gamma * sigmoid["k_upper"], 6)},
         "total_penalties_ct": round(total_penalties, 6),
+        # Per round, not per trade: the redistribution is a round-level
+        # property and deliberately stays out of the trade `parameters`
+        # written above (D-42). Computed only — nothing is paid out (D-25).
+        "redistribution": redistribution(results, clearing_price,
+                                         traded_quantity),
         "results": results,
     }
 

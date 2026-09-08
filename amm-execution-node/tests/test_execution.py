@@ -1,8 +1,10 @@
 """Execution cycle tests against an in-memory fake off-chain DB."""
 
+import logging
+
 import pytest
 
-from src.config import Config
+from src.config import Config, load_config
 from src.execution import (compute_previous_timeslot, run_execution,
                            run_polling_cycle)
 from src.sigmoid import sigmoid_price
@@ -335,3 +337,200 @@ async def test_polling_cycle_executes_due_markets(cfg, monkeypatch):
     summaries = await run_polling_cycle(cfg, db)
     assert len(summaries) == 1
     assert summaries[0]["market_id"] == MARKET
+
+
+# ------------------------------------------------------------- relative eta
+
+def mixed_size_db(measurements):
+    """Two sellers of very different size in one supply-limited round.
+
+    A 2 kWh and a 10 kWh trade: the whole point of a relative deadband is
+    that these two must not share one absolute tolerance.
+    """
+    price = sigmoid_price(12.0 / 14.0, **SIGMOID)
+    trades = [
+        seller_trade("t-small", "PV Small", "area_small", 2.0, 2.0, price,
+                     12.0, 14.0),
+        seller_trade("t-large", "PV Large", "area_large", 10.0, 10.0, price,
+                     12.0, 14.0),
+        buyer_trade("t-h1", "House 1", "area_h1", 12.0, 14.0, price,
+                    12.0, 14.0),
+    ]
+    return FakeOffchainDB(trades, measurements), price
+
+
+# Same *relative* deviation story on both trades: the small seller misses by
+# 0.15 kWh (7.5 %), the large one by 1.5 kWh (15 %).
+MIXED_MEASUREMENTS = {("area_small", SLOT): 1.85,
+                      ("area_large", SLOT): 8.5,
+                      ("area_h1", SLOT): 12.0}
+
+
+@pytest.mark.anyio
+async def test_relative_eta_scales_the_deadband_with_the_trade():
+    # eta_relative = 0.1 -> deadband 0.2 kWh on the 2 kWh trade and 1.0 kWh
+    # on the 10 kWh one. The small seller's 0.15 kWh miss is forgiven, the
+    # large seller's 1.5 kWh miss is not.
+    db, _ = mixed_size_db(MIXED_MEASUREMENTS)
+    cfg = Config(penalty_gamma=1.1, penalty_eta_kwh=0.0,
+                 penalty_eta_relative=0.1)
+    result = await run_execution(trigger(), cfg, db)
+
+    rows = {r["name"]: r for r in result["results"]}
+    assert rows["PV Small"]["shortfall_kwh"] == pytest.approx(0.0)
+    assert rows["PV Small"]["shortfall_penalty_ct"] == 0.0
+    # 10.0 - 8.5 - 1.0 = 0.5 kWh over the deadband
+    assert rows["PV Large"]["shortfall_kwh"] == pytest.approx(0.5)
+    assert rows["PV Large"]["shortfall_penalty_ct"] == pytest.approx(
+        0.5 * 1.1 * 28.5)
+
+
+@pytest.mark.anyio
+async def test_absolute_eta_is_reproduced_exactly_when_relative_is_unset():
+    """This test protects the reproduction path.
+
+    `penalty_eta_relative = None` must leave the absolute `penalty_eta_kwh`
+    behaviour untouched, so the runs recorded on 25.08. and 02.09. reproduce
+    figure for figure. One absolute deadband of 0.1 kWh applies to the 2 kWh
+    and the 10 kWh trade alike — which is exactly what the relative
+    parameterisation replaces, and what must stay available.
+    """
+    db, _ = mixed_size_db(MIXED_MEASUREMENTS)
+    cfg = Config(penalty_gamma=1.1, penalty_eta_kwh=0.1,
+                 penalty_eta_relative=None)
+    result = await run_execution(trigger(), cfg, db)
+
+    rows = {r["name"]: r for r in result["results"]}
+    # 2.0 - 1.85 - 0.1 = 0.05 ; 10.0 - 8.5 - 0.1 = 1.4 — the same 0.1 kWh
+    # deadband on both trades, unscaled.
+    assert rows["PV Small"]["shortfall_kwh"] == pytest.approx(0.05)
+    assert rows["PV Large"]["shortfall_kwh"] == pytest.approx(1.4)
+    assert rows["PV Small"]["shortfall_penalty_ct"] == pytest.approx(
+        0.05 * 1.1 * 28.5)
+    assert rows["PV Large"]["shortfall_penalty_ct"] == pytest.approx(
+        1.4 * 1.1 * 28.5)
+
+
+@pytest.mark.anyio
+async def test_penalty_params_report_which_eta_path_was_taken():
+    db, _ = mixed_size_db(MIXED_MEASUREMENTS)
+
+    relative = await run_execution(
+        trigger(), Config(penalty_eta_kwh=0.1, penalty_eta_relative=0.05), db)
+    assert relative["penalty_params"]["eta_mode"] == "relative"
+    assert relative["penalty_params"]["eta_relative"] == pytest.approx(0.05)
+    # the absolute key is still reported, so a run stays identifiable
+    assert relative["penalty_params"]["eta_kwh"] == pytest.approx(0.1)
+
+    db, _ = mixed_size_db(MIXED_MEASUREMENTS)
+    absolute = await run_execution(
+        trigger(), Config(penalty_eta_kwh=0.1, penalty_eta_relative=None), db)
+    assert absolute["penalty_params"]["eta_mode"] == "absolute"
+    assert absolute["penalty_params"]["eta_relative"] is None
+
+
+def test_relative_eta_of_one_is_rejected_at_config_load(tmp_path):
+    # eta_relative >= 1.0 would let the deadband swallow the whole trade.
+    path = tmp_path / "configuration.yaml"
+    path.write_text("penalty:\n  gamma: 1.1\n  eta_relative: 1.0\n",
+                    encoding="utf-8")
+    with pytest.raises(ValueError, match="eta_relative"):
+        load_config(path)
+
+    path.write_text("penalty:\n  gamma: 1.1\n  eta_relative: -0.1\n",
+                    encoding="utf-8")
+    with pytest.raises(ValueError, match="eta_relative"):
+        load_config(path)
+
+    # the open interval's upper neighbour is still valid
+    path.write_text("penalty:\n  gamma: 1.1\n  eta_relative: 0.99\n",
+                    encoding="utf-8")
+    assert load_config(path).penalty_eta_relative == pytest.approx(0.99)
+
+
+@pytest.mark.anyio
+async def test_negative_forecast_is_read_as_its_magnitude(cfg, caplog):
+    """Issue #32: GSY writes a seller's forecast as -energy.
+
+    `ForecastSchema.energy_kwh` is signed on the GSY side, so against a real
+    instance every seller forecast arrives negative — `deliverable < 0` and
+    `W_sell = max(0, deliverable - traded - eta)` would be 0 for every seller
+    while `deliverable_source` still read "forecast". Reading the magnitude
+    is correct under either convention; the warning makes the ambiguity
+    visible.
+    """
+    measurements = {("area_pva", SLOT): 5.0, ("area_pvb", SLOT): 3.0,
+                    ("area_h1", SLOT): 4.8, ("area_h2", SLOT): 3.2}
+    positive_db, price = supply_limited_db(
+        measurements, forecasts={("area_pvb", SLOT): 5.0})
+    negative_db, _ = supply_limited_db(
+        measurements, forecasts={("area_pvb", SLOT): -5.0})
+
+    positive = await run_execution(trigger(), cfg, positive_db)
+    with caplog.at_level(logging.WARNING, logger="amm-execution-node.execution"):
+        negative = await run_execution(trigger(), cfg, negative_db)
+
+    pos_row = {r["name"]: r for r in positive["results"]}["PV B"]
+    neg_row = {r["name"]: r for r in negative["results"]}["PV B"]
+    assert neg_row["deliverable_kwh"] == pytest.approx(pos_row["deliverable_kwh"])
+    assert neg_row["deliverable_kwh"] == pytest.approx(5.0)
+    assert neg_row["deliverable_source"] == "forecast"
+    # the withholding penalty survives the sign, which is the whole point
+    assert neg_row["externality_penalty_ct"] == pytest.approx(
+        pos_row["externality_penalty_ct"])
+    assert neg_row["externality_penalty_ct"] > 0.0
+    assert any("negative value" in record.getMessage()
+               for record in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_negative_forecasts_warn_once_per_slot(cfg, caplog):
+    # Two negative rows, one warning: a 672-slot campaign must not drown in
+    # one log line per participant.
+    db, _ = supply_limited_db(
+        {("area_pva", SLOT): 5.0, ("area_pvb", SLOT): 3.0},
+        forecasts={("area_pva", SLOT): -6.0, ("area_pvb", SLOT): -5.0})
+    with caplog.at_level(logging.WARNING, logger="amm-execution-node.execution"):
+        await run_execution(trigger(), cfg, db)
+
+    warnings = [r for r in caplog.records
+                if "negative value" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "2 negative value" in warnings[0].getMessage()
+
+
+@pytest.mark.anyio
+async def test_the_redistribution_block_travels_in_the_response(cfg):
+    """D-42: the arithmetic belongs in the node, and in its response.
+
+    A 672-slot campaign will not be read from log files, so the block sits
+    next to `total_penalties_ct` — and deliberately *not* in the trade
+    `parameters`, which are per trade while the redistribution is per round.
+    """
+    db, price = supply_limited_db(
+        {("area_pva", SLOT): 5.0, ("area_pvb", SLOT): 3.0,
+         ("area_h1", SLOT): 4.8, ("area_h2", SLOT): 3.2},
+        forecasts={("area_pvb", SLOT): 5.0})
+    result = await run_execution(trigger(), cfg, db)
+
+    block = result["redistribution"]
+    assert block["rule"] == "proportional"
+    assert block["computed_only"] is True
+    # PV B withheld, so the buyers are harmed and PV A — who profits — is not
+    assert block["harmed_side"] == "buyer"
+    assert block["excluded_deviators"] == ["area_pvb"]
+    assert {r["area_uuid"] for r in block["rows"]} == {"area_h1", "area_h2"}
+
+    # one deviator on one side: budget-balanced by construction
+    pv_b = {r["name"]: r for r in result["results"]}["PV B"]
+    assert block["penalty_pool_ct"] == pytest.approx(
+        pv_b["externality_penalty_ct"])
+    assert block["budget_balance_ct"] == pytest.approx(0.0, abs=1e-6)
+    # the harmed buyers split the pool by their own traded volume, 4.8 : 3.2
+    by_area = {r["area_uuid"]: r for r in block["rows"]}
+    assert (by_area["area_h1"]["compensation_ct"]
+            / by_area["area_h2"]["compensation_ct"]) == pytest.approx(4.8 / 3.2)
+
+    # per round, not per trade: nothing of this reaches the trade parameters
+    for _uuid, _status, parameters in db.trade_patches:
+        assert "redistribution" not in parameters

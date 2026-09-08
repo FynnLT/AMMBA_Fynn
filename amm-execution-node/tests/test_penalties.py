@@ -2,7 +2,7 @@ import pytest
 
 from src.penalties import (BALANCED, DEMAND_LIMITED, SUPPLY_LIMITED,
                            buyer_externality_penalty, determine_round_type,
-                           seller_externality_penalty,
+                           redistribution, seller_externality_penalty,
                            seller_shortfall_penalty)
 from src.sigmoid import sigmoid_price
 
@@ -100,3 +100,149 @@ class TestBuyerExternality:
     def test_no_penalty_when_consumption_matches_or_undershoots(self):
         assert self._penalty(reported=2.5, actual=2.5) is None
         assert self._penalty(reported=2.5, actual=1.0) is None
+
+
+class TestRedistribution:
+    """Proportional compensation of the price damage (D-42/D-43/D-61).
+
+    Rows are constructed directly rather than driven through `run_execution`:
+    the function's contract is the participant-row shape, and hand-computed
+    figures make the budget balance checkable by eye.
+    """
+
+    @staticmethod
+    def _row(area, role, traded, *, externality=0.0, p_cf=None, shortfall=0.0):
+        return {"area_uuid": area, "role": role, "traded_kwh": traded,
+                "externality_penalty_ct": externality,
+                "shortfall_penalty_ct": shortfall,
+                "counterfactual_price_ct_per_kwh": p_cf}
+
+    def test_budget_balance_is_zero_for_a_single_deviator(self):
+        # p = 16.0, p_cf = 15.0, Q_t = 10 -> pool = 1.0 * 10 = 10.00 ct.
+        # Buyers hold 4 and 6 kWh -> damages 4.00 and 6.00 ct.
+        rows = [
+            self._row("area_pv", "seller", 10.0, externality=10.0, p_cf=15.0),
+            self._row("area_h1", "buyer", 4.0),
+            self._row("area_h2", "buyer", 6.0),
+        ]
+        result = redistribution(rows, clearing_price=16.0,
+                                traded_quantity_kwh=10.0)
+
+        assert result["rule"] == "proportional"
+        assert result["computed_only"] is True
+        assert result["harmed_side"] == "buyer"
+        assert result["penalty_pool_ct"] == pytest.approx(10.0)
+        assert result["budget_balance_ct"] == pytest.approx(0.0, abs=1e-6)
+        by_area = {r["area_uuid"]: r for r in result["rows"]}
+        assert by_area["area_h1"]["damage_ct"] == pytest.approx(4.0)
+        assert by_area["area_h1"]["compensation_ct"] == pytest.approx(4.0)
+        assert by_area["area_h2"]["damage_ct"] == pytest.approx(6.0)
+        assert by_area["area_h2"]["compensation_ct"] == pytest.approx(6.0)
+
+    def test_the_profiting_side_receives_nothing(self):
+        """The whole point of the D-43 correction.
+
+        A withholding seller raises the price, so the *other sellers* profit
+        from the deviation — they are not harmed and must not be compensated.
+        Spreading the pool over both market sides would make the summed
+        quantity 2*Q_t, cover each harmed buyer at roughly half his damage
+        (4.00 ct becomes 2.35 ct here) and still report
+        `budget_balance_ct == 0.00`, because the pool is fully distributed
+        either way. The error would be invisible in exactly the number meant
+        to prove the mechanism.
+        """
+        rows = [
+            self._row("area_pv", "seller", 10.0, externality=10.0, p_cf=15.0),
+            self._row("area_pv2", "seller", 4.0),   # profits, not harmed
+            self._row("area_pv3", "seller", 3.0),   # profits, not harmed
+            self._row("area_h1", "buyer", 4.0),
+            self._row("area_h2", "buyer", 6.0),
+        ]
+        result = redistribution(rows, clearing_price=16.0,
+                                traded_quantity_kwh=10.0)
+
+        areas = {r["area_uuid"] for r in result["rows"]}
+        assert areas == {"area_h1", "area_h2"}
+        by_area = {r["area_uuid"]: r for r in result["rows"]}
+        assert by_area["area_h1"]["compensation_ct"] == pytest.approx(4.0)
+        # the figure the both-sides reading would have produced
+        assert by_area["area_h1"]["compensation_ct"] != pytest.approx(
+            2.35, abs=1e-2)
+        assert result["budget_balance_ct"] == pytest.approx(0.0, abs=1e-6)
+
+    def test_a_clean_round_returns_zeros_without_dividing(self):
+        rows = [self._row("area_pv", "seller", 10.0),
+                self._row("area_h1", "buyer", 10.0)]
+        result = redistribution(rows, clearing_price=16.0,
+                                traded_quantity_kwh=10.0)
+
+        assert result["harmed_side"] is None
+        assert result["penalty_pool_ct"] == 0.0
+        assert result["compensated_ct"] == 0.0
+        assert result["budget_balance_ct"] == 0.0
+        assert result["rows"] == []
+        assert result["excluded_deviators"] == []
+
+    def test_a_seller_with_a_shortfall_is_still_compensated(self):
+        """D-61: only an externality penalty excludes from the harmed set.
+
+        Demand-limited round — a buyer underreports, so the sellers are
+        harmed. One of them carries a shortfall penalty: that does not
+        manipulate the price and is already penalised on its own axis, so he
+        stays in the harmed set.
+        """
+        rows = [
+            self._row("area_h1", "buyer", 10.0, externality=10.0, p_cf=17.0),
+            self._row("area_pv", "seller", 6.0, shortfall=31.35),
+            self._row("area_bat", "seller", 4.0),
+        ]
+        result = redistribution(rows, clearing_price=16.0,
+                                traded_quantity_kwh=10.0)
+
+        assert result["harmed_side"] == "seller"
+        by_area = {r["area_uuid"]: r for r in result["rows"]}
+        assert "area_pv" in by_area
+        assert by_area["area_pv"]["compensation_ct"] == pytest.approx(6.0)
+        assert by_area["area_bat"]["compensation_ct"] == pytest.approx(4.0)
+        assert result["budget_balance_ct"] == pytest.approx(0.0, abs=1e-6)
+
+    def test_several_deviators_report_a_balance_without_claiming_zero(self):
+        # Two deviating sellers. Counterfactuals are not additive, so the
+        # budget balance need not be zero; the point is that the number is
+        # visible in the output rather than averaged away.
+        rows = [
+            self._row("area_pva", "seller", 6.0, externality=10.0, p_cf=15.0),
+            self._row("area_pvb", "seller", 4.0, externality=5.0, p_cf=15.5),
+            self._row("area_h1", "buyer", 4.0),
+            self._row("area_h2", "buyer", 6.0),
+        ]
+        result = redistribution(rows, clearing_price=16.0,
+                                traded_quantity_kwh=10.0)
+
+        assert result["penalty_pool_ct"] == pytest.approx(15.0)
+        assert isinstance(result["budget_balance_ct"], float)
+        assert set(result["excluded_deviators"]) == {"area_pva", "area_pvb"}
+        assert {r["area_uuid"] for r in result["rows"]} == {"area_h1", "area_h2"}
+
+    def test_a_deviator_is_excluded_from_the_harmed_set(self):
+        """Exercises the D-43 exclusion rule against constructed rows.
+
+        The present round model cannot trigger it: externality penalties are
+        applied on one market side only (`round_kind` is SUPPLY_LIMITED or
+        DEMAND_LIMITED) and the harmed set is the opposite side, so a
+        deviator can never be in the harmed set. The rule is implemented for
+        the case the model does not produce; a market scenario for it would
+        be a scenario this artifact cannot generate.
+        """
+        rows = [
+            self._row("area_pv", "seller", 10.0, externality=10.0, p_cf=15.0),
+            # Constructed: a buyer that also carries an externality penalty.
+            self._row("area_h1", "buyer", 4.0, externality=2.0, p_cf=17.0),
+            self._row("area_h2", "buyer", 6.0),
+        ]
+        result = redistribution(rows, clearing_price=16.0,
+                                traded_quantity_kwh=10.0)
+
+        areas = {r["area_uuid"] for r in result["rows"]}
+        assert areas == {"area_h2"}
+        assert "area_h1" in result["excluded_deviators"]

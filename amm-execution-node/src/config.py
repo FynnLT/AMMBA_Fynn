@@ -3,7 +3,7 @@
 Recognized overrides (env always wins, guide §4.3 pattern):
     OFFCHAIN_DB_URL, TIME_SLOT_SEC, EXECUTION_OFFSET_MIN,
     POLLING_INTERVAL_SEC, POLLING_ENABLED, PENALTY_GAMMA,
-    PENALTY_TOLERANCE_KWH, HOST, PORT, CONFIG_FILE
+    PENALTY_TOLERANCE_KWH, PENALTY_ETA_RELATIVE, HOST, PORT, CONFIG_FILE
 
 RPC_URL / CONTRACT_ADDRESS are accepted (the compose file passes them for
 forward-compatibility) but unused: the Execution Node is fully self-contained
@@ -30,7 +30,11 @@ class Config:
     polling_enabled: bool = False      # PoC default: triggered via the demo UI
     poll_communities: tuple = ()       # community uuids scanned by the poller
     penalty_gamma: float = 1.1         # γ > 1, K_sho = γ * K_upper
-    penalty_eta_kwh: float = 0.0       # η tolerance threshold
+    penalty_eta_kwh: float = 0.0       # η tolerance threshold, absolute kWh
+    # η relative to the trade's own quantity (D-26/D-44). None keeps the
+    # absolute `penalty_eta_kwh` path, which is the reproduction path for the
+    # runs recorded before 09/2026.
+    penalty_eta_relative: float | None = None
 
 
 def _to_bool(value: str) -> bool:
@@ -46,6 +50,7 @@ _ENV_OVERRIDES = {
     "POLLING_ENABLED": ("polling_enabled", _to_bool),
     "PENALTY_GAMMA": ("penalty_gamma", float),
     "PENALTY_TOLERANCE_KWH": ("penalty_eta_kwh", float),
+    "PENALTY_ETA_RELATIVE": ("penalty_eta_relative", float),
     "HOST": ("host", str),
     "PORT": ("port", int),
 }
@@ -74,6 +79,8 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         poll_communities=tuple(execution.get("poll_communities") or ()),
         penalty_gamma=float(penalty.get("gamma", 1.1)),
         penalty_eta_kwh=float(penalty.get("eta_tolerance_kwh", 0.0)),
+        penalty_eta_relative=(None if penalty.get("eta_relative") is None
+                              else float(penalty["eta_relative"])),
     )
 
     env = os.environ
@@ -82,4 +89,21 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
                  if env.get(name)}
     if overrides:
         cfg = replace(cfg, **overrides)
+    _validate(cfg)
     return cfg
+
+
+def _validate(cfg: Config) -> None:
+    """Checked after the env overrides, so both channels obey the same rule.
+
+    `penalty_eta_relative >= 1.0` would mean the deadband swallows the whole
+    trade and no deviation could ever be penalised; a negative one is not a
+    tolerance at all. The service has no configuration-error type of its own,
+    so this raises `ValueError` at load time.
+    """
+    eta_relative = cfg.penalty_eta_relative
+    if eta_relative is None:
+        return
+    if eta_relative < 0.0 or eta_relative >= 1.0:
+        raise ValueError(
+            f"penalty.eta_relative must be in [0.0, 1.0), got {eta_relative!r}")

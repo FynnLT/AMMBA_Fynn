@@ -189,6 +189,11 @@ class MultiplierResult:
     buyers_pay_ct: float
     sellers_receive_ct: float
     pool_surplus_ct: float
+    #: Configured parameters that are inert in this round's formulation, and
+    #: fields that stop carrying a mode difference. Reported rather than
+    #: rejected: a divergence belongs in the output, not only in a log nobody
+    #: reads during a 96-slot campaign (D-46, issue #28).
+    warnings: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -207,6 +212,7 @@ class MultiplierResult:
             "buyers_pay_ct": round(self.buyers_pay_ct, _ROUND),
             "sellers_receive_ct": round(self.sellers_receive_ct, _ROUND),
             "pool_surplus_ct": round(self.pool_surplus_ct, _ROUND),
+            "warnings": list(self.warnings),
         }
 
 
@@ -234,6 +240,13 @@ def _mutual_pairs(bids: list[dict], offers: list[dict]) -> list[tuple[int, int]]
             continue
         for offer_idx, offer in enumerate(offers):
             if offer.get("area_uuid") != partner:
+                continue
+            # An area is not its own counterparty: self-pairing would pass
+            # the mutuality check below — an area on both sides *is* on the
+            # opposite side of itself — and buy free preference priority
+            # (D-58). Kept here as well as in the clearing's book check, so
+            # it holds even if that check is later relaxed.
+            if bid.get("area_uuid") == offer.get("area_uuid"):
                 continue
             if offer_partner[offer_idx] != bid.get("area_uuid"):
                 continue
@@ -395,6 +408,11 @@ def _multiplicative_rates(green_alloc: float, grey_alloc: float, price: float,
     levy does not fully fund it. When the levy *over*-collects, the scaling
     stays at 1 and the difference remains with the pool — see
     `MultiplierResult`.
+
+    `levy_cap` bounds the per-kWh rate rather than the total collected, so a
+    grey producer can check his worst case against his own settlement before
+    the slot; a cap on the pot would make that individual bound depend on the
+    grey volume other participants happen to bring (D-45).
     """
     levy_eff = min(cfg.grey_levy, cfg.levy_cap)
     levy_collected = grey_alloc * price * levy_eff
@@ -416,7 +434,11 @@ def _additive_rates(green_alloc: float, grey_alloc: float, price: float,
     Bonus-driven and zero-sum by construction: the green bonus per kWh is the
     parameter and the grey levy per kWh follows from funding it completely.
     A levy above `levy_cap` is capped, and the bonus is scaled down
-    proportionally so the zero-sum property survives the cap.
+    proportionally so the zero-sum property survives the cap. The cap bounds
+    the per-kWh rate rather than the total collected, so a grey producer can
+    check his worst case against his own settlement before the slot; a cap on
+    the pot would make that individual bound depend on the grey volume other
+    participants happen to bring (D-45).
 
     TODO(verify-against-infopaper): this formulation is reconstructed from the
     worked example (48.75 / 51.25 / 60), not quoted from the paper. Verify
@@ -444,6 +466,34 @@ def _additive_rates(green_alloc: float, grey_alloc: float, price: float,
 
 def _is_pool_side(name: str, pool_id: str) -> bool:
     return bool(pool_id) and name == pool_id
+
+
+def multiplier_warnings(mode: str, sides: str,
+                        grey_levy: float) -> tuple[str, ...]:
+    """Configured parameters that are inert in this round's formulation.
+
+    Shared by the fresh run and the idempotent re-trigger path so both report
+    the same warnings; the re-trigger path reads `mode`, `sides` and
+    `grey_levy` back out of the stored trade `parameters`.
+
+    Neither case is an error. The value is inert here, not invalid —
+    rejecting the request would abort a campaign run over a parameter that
+    simply has no effect. Surfacing it in the response is the same reasoning
+    as issue #28: a divergence belongs in the output, not only in a log
+    nobody reads during a 96-slot campaign (D-46).
+    """
+    warnings = []
+    if mode == "additive" and grey_levy:
+        warnings.append("grey_levy is ignored in additive mode: the levy "
+                        "follows from the funding condition")
+    if sides == "both":
+        # Not "the mode comparison collapses" — the two formulations differ
+        # at every measured parameter point, also at sides="both". What stops
+        # carrying the difference is this one metric, not the comparison.
+        warnings.append('the pool surplus is zero by construction at '
+                        'sides="both"; compare the formulations on the buyer '
+                        'and grey seller rates instead')
+    return tuple(warnings)
 
 
 def bonus_scale(bonus_paid_ct: float, bonus_requested_ct: float) -> float:
@@ -496,6 +546,8 @@ def apply_energy_type_multipliers(trades: list[dict], *, clearing_price: float,
                       if energy_type(t) != GREY)
     grey_alloc = sum(allocated(t) for t in seller_trades
                      if energy_type(t) == GREY)
+
+    warnings = multiplier_warnings(cfg.mode, cfg.sides, cfg.grey_levy)
 
     active = cfg.enabled and cfg.multipliers_enabled
     if not active:
@@ -556,7 +608,8 @@ def apply_energy_type_multipliers(trades: list[dict], *, clearing_price: float,
         green_final_ct_per_kwh=green_final, grey_final_ct_per_kwh=grey_final,
         buyer_final_ct_per_kwh=buyer_final, buyers_pay_ct=buyers_pay,
         sellers_receive_ct=sellers_receive,
-        pool_surplus_ct=buyers_pay - sellers_receive)
+        pool_surplus_ct=buyers_pay - sellers_receive,
+        warnings=warnings)
 
     # Threshold, not EPSILON: settling rates at 6 decimals leaves sub-0.0001 ct
     # dust on the pool either way, which is rounding rather than economics.

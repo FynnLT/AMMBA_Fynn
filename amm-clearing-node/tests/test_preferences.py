@@ -22,7 +22,7 @@ from src.clearing import run_clearing
 from src.config import (Config, PreferenceConfig, PreferenceConfigError,
                         load_config, resolve_preferences)
 from src.contract import MockContractClient
-from src.preferences import (AllocationError, _check_balance,
+from src.preferences import (AllocationError, _check_balance, _mutual_pairs,
                              apply_preference_allocation, parse_energy_type,
                              parse_preferred_partner)
 
@@ -751,3 +751,126 @@ async def test_multipliers_do_not_change_execution_node_penalties():
 
     assert comparable(penalties_with) == comparable(penalties_without)
     assert any(row["total_penalty_ct"] > 0 for row in penalties_with)
+
+
+# ------------------------------------------- D-58: one side per area + slot
+
+@pytest.mark.anyio
+async def test_an_area_on_both_sides_is_rejected():
+    """D-58 (a): the book check, with the offending area named.
+
+    An area holding a Bid and an Offer in the same market breaks the
+    Execution Node's measurement lookup, which is keyed by area alone: one
+    meter reading would be read once as delivered and once as consumed.
+    """
+    orders = [
+        make_order(1, "Offer", "PV A", "area-pv-a", 5.0),
+        make_order(2, "Offer", "Household 1", "area-house-1", 3.5),
+        make_order(3, "Bid", "Household 1", "area-house-1", 4.5),
+        make_order(4, "Bid", "Household 2", "area-house-2", 3.0),
+    ]
+    with pytest.raises(PreferenceConfigError) as excinfo:
+        await clear(orders)
+
+    assert "area-house-1" in str(excinfo.value)
+    # the areas that behaved are not implicated
+    assert "area-pv-a" not in str(excinfo.value)
+
+
+@pytest.mark.anyio
+async def test_a_clean_book_passes_the_one_side_check():
+    # The guard must not fire on the reference market, where every area holds
+    # exactly one side.
+    result = await clear(reference_book())
+    assert result["status"] == "cleared"
+
+
+def test_an_area_is_never_its_own_preferred_partner():
+    """D-58 (b): the mutuality check must reject self-pairing.
+
+    An area posting on both sides *is* on the opposite side of itself, so
+    without this the pair would match and buy free preference priority. Kept
+    independent of the book check above, so it holds even if that is later
+    relaxed.
+    """
+    bids = [make_order(1, "Bid", "Household 1", "area-house-1", 4.5,
+                       partner="area-house-1")]
+    offers = [make_order(2, "Offer", "Household 1", "area-house-1", 5.0,
+                         partner="area-house-1")]
+
+    assert _mutual_pairs(bids, offers) == []
+
+
+def test_a_genuine_mutual_pair_still_matches():
+    # The self-pair rejection must not disturb the ordinary case.
+    bids = [make_order(1, "Bid", "Household 1", "area-house-1", 4.5,
+                       partner="area-pv-a")]
+    offers = [make_order(2, "Offer", "PV A", "area-pv-a", 5.0,
+                         partner="area-house-1")]
+
+    assert _mutual_pairs(bids, offers) == [(0, 0)]
+
+
+# ------------------------------------------------- D-46: multiplier warnings
+
+@pytest.mark.anyio
+async def test_additive_mode_reports_that_grey_levy_is_inert():
+    """D-46: in additive mode the levy follows from the funding condition.
+
+    A campaign run configured with a carefully chosen `grey_levy` in additive
+    mode measures something other than its config suggests. Not an HTTP 400 —
+    the value is inert, not invalid — and not log-only.
+    """
+    result = await clear(reference_book(), mode="additive", grey_levy=0.10)
+    multipliers = result["preferences"]["multipliers"]
+
+    assert len(multipliers["warnings"]) == 1
+    assert "grey_levy is ignored in additive mode" in multipliers["warnings"][0]
+
+    # The rates are unchanged — which is exactly what "ignored" means: the
+    # same run with grey_levy = 0.0 produces identical figures, so the
+    # warning is additional and not a behaviour change.
+    without_levy = await clear(reference_book(), mode="additive",
+                               grey_levy=0.0)
+    for key in ("green_final_ct_per_kwh", "grey_final_ct_per_kwh",
+                "buyer_final_ct_per_kwh", "levy_collected_ct",
+                "bonus_paid_ct", "pool_surplus_ct"):
+        assert multipliers[key] == pytest.approx(
+            without_levy["preferences"]["multipliers"][key])
+    assert without_levy["preferences"]["multipliers"]["warnings"] == []
+
+
+@pytest.mark.anyio
+async def test_multiplicative_mode_does_not_warn_about_grey_levy():
+    # There the levy *is* the parameter, so nothing is inert.
+    result = await clear(reference_book(), mode="multiplicative",
+                         grey_levy=0.10)
+    assert result["preferences"]["multipliers"]["warnings"] == []
+
+
+@pytest.mark.anyio
+async def test_sides_both_reports_that_the_pool_surplus_carries_nothing():
+    # At sides="both" the surplus is zero by construction, so that one field
+    # stops carrying the mode difference — the comparison itself does not.
+    result = await clear(reference_book(), sides="both")
+    warnings = result["preferences"]["multipliers"]["warnings"]
+
+    assert len(warnings) == 1
+    assert "pool surplus is zero by construction" in warnings[0]
+    assert "buyer and grey seller rates" in warnings[0]
+    # the wording must not claim the comparison itself is meaningless
+    assert "collapse" not in warnings[0]
+
+
+@pytest.mark.anyio
+async def test_warnings_is_present_and_empty_in_a_plain_run():
+    # Consumers can rely on the key existing on every response.
+    result = await clear(reference_book())
+    assert result["preferences"]["multipliers"]["warnings"] == []
+
+
+@pytest.mark.anyio
+async def test_both_warnings_are_reported_together():
+    result = await clear(reference_book(), mode="additive", sides="both",
+                         grey_levy=0.10)
+    assert len(result["preferences"]["multipliers"]["warnings"]) == 2

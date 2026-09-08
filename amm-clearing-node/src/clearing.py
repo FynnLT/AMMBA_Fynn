@@ -10,12 +10,14 @@ order statuses.
 import asyncio
 import logging
 
-from src.config import Config, resolve_community, resolve_preferences
+from src.config import (Config, PreferenceConfigError, resolve_community,
+                        resolve_preferences)
 from src.contract import BaseContractClient, ContractError
 from src.offchain_db import OffchainDBClient
 from src.preferences import (GREY, MIXED, MultiplierResult,
                              apply_energy_type_multipliers,
-                             apply_preference_allocation, bonus_scale)
+                             apply_preference_allocation, bonus_scale,
+                             multiplier_warnings)
 from src.sigmoid import clamp_price, sigmoid_price, to_node_int
 from src.trade_builder import build_all_trades, rehash_trade
 
@@ -159,7 +161,10 @@ def _preferences_from_trades(trades: list[dict], pool_id: str,
         green_final_ct_per_kwh=green_final, grey_final_ct_per_kwh=grey_final,
         buyer_final_ct_per_kwh=first_rate(buyer_trades),
         buyers_pay_ct=buyers_pay, sellers_receive_ct=sellers_receive,
-        pool_surplus_ct=buyers_pay - sellers_receive)
+        pool_surplus_ct=buyers_pay - sellers_receive,
+        warnings=multiplier_warnings(meta.get("mode", "multiplicative"),
+                                     meta.get("sides", "seller"),
+                                     float(meta.get("grey_levy", 0.0))))
 
     pairs = []
     for trade in seller_trades:
@@ -228,6 +233,13 @@ def _summary_from_existing_trades(trades: list[dict], market_id: str,
         preferences=_preferences_from_trades(trades, pool_id, clearing_price),
         status="already_cleared",
         recovered_from_anchor=False,
+        # No anchoring happened in this run, so there are no two prices to
+        # report; the hash flag reads off what the stored trades carry, which
+        # is where an anchor lost to log pruning (#28) would show up.
+        anchored_price_ct=None,
+        recomputed_price_ct=None,
+        price_source="computed",
+        anchor_tx_hash_recovered=bool(params.get("amm_tx_hash")),
         message="trades already exist for this market_id + time_slot; "
                 "clearing is idempotent and was not re-run",
     )
@@ -236,7 +248,7 @@ def _summary_from_existing_trades(trades: list[dict], market_id: str,
 async def _anchor_or_recover(chain: BaseContractClient, *, market_id: str,
                              community_uuid: str, time_slot: int,
                              total_supply_kwh: float, total_demand_kwh: float,
-                             clearing_price: float) -> tuple[str, float, bool]:
+                             clearing_price: float) -> dict:
     """Anchor the clearing on-chain, or continue from an anchor that exists.
 
     The failure this recovers from: `clearMarket` succeeded but `post_trades`
@@ -249,14 +261,22 @@ async def _anchor_or_recover(chain: BaseContractClient, *, market_id: str,
     Only that one revert is recovered from. A bounds-check failure or an
     unauthorised caller still propagates and fails the run loudly.
 
-    Returns `(tx_hash, clearing_price, recovered)`.
+    Returns the anchor outcome as a dict. Beyond the settled price and hash it
+    carries what a campaign cannot count from log lines (D-60, issue #28): the
+    two prices a recovery had to choose between, which of them the response
+    settles on, and whether the anchor's transaction hash could be read back
+    at all. `price_source` and `anchor_tx_hash_recovered` are present on every
+    run, so a 672-slot campaign can group by them.
     """
     try:
         tx_hash = await chain.clear_market(
             market_id=market_id, community_uuid=community_uuid,
             time_slot=time_slot, total_supply_kwh=total_supply_kwh,
             total_demand_kwh=total_demand_kwh, clearing_price=clearing_price)
-        return tx_hash, clearing_price, False
+        return {"tx_hash": tx_hash, "clearing_price": clearing_price,
+                "recovered_from_anchor": False, "anchored_price_ct": None,
+                "recomputed_price_ct": None, "price_source": "computed",
+                "anchor_tx_hash_recovered": True}
     except ContractError as exc:
         if _ALREADY_CLEARED not in str(exc):
             raise
@@ -274,6 +294,7 @@ async def _anchor_or_recover(chain: BaseContractClient, *, market_id: str,
     # recovered slot settle identically to a first-time one.
     anchored_price = anchor["clearing_price"]
     price = clearing_price
+    price_source = "computed"
     if to_node_int(anchored_price) != to_node_int(clearing_price):
         # A real divergence: the order book changed between the anchor and
         # this retry. The committed anchor wins, at the precision it holds.
@@ -281,10 +302,24 @@ async def _anchor_or_recover(chain: BaseContractClient, *, market_id: str,
                        "computed %.6f — settling on the anchored price",
                        market_id, anchored_price, clearing_price)
         price = anchored_price
+        price_source = "anchor"
     logger.warning("market %s already anchored on-chain (tx %s) but carries "
                    "no trades — recovering the anchor and retrying the trade "
                    "write-back", market_id, anchor["tx_hash"])
-    return anchor["tx_hash"], price, True
+    return {
+        "tx_hash": anchor["tx_hash"],
+        "clearing_price": price,
+        "recovered_from_anchor": True,
+        # Both prices, so the divergence is readable from the response rather
+        # than only from a warning nobody greps over 672 slots (D-60).
+        "anchored_price_ct": anchored_price,
+        "recomputed_price_ct": clearing_price,
+        "price_source": price_source,
+        # The recovery is valid without the hash — the run must not fail — but
+        # a trade written with an empty `amm_tx_hash` is a record with no
+        # audit link, and that must not look like an ordinary success (#28).
+        "anchor_tx_hash_recovered": anchor["tx_hash"] is not None,
+    }
 
 
 async def _expire_one_sided_market(db: OffchainDBClient, open_orders: list[dict],
@@ -324,8 +359,13 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
                 market_id, community_uuid, time_slot)
 
     # ---- Idempotency check (guide §4.7) --------------------------------
+    # Filtered on `market_id` client-side as well: the production GSY API
+    # accepts the parameter and ignores it (the filter line is commented out
+    # in routes/trades.rs), so a foreign trade with a matching `time_slot`
+    # would otherwise be read as "already cleared" (issue #26).
     existing = [t for t in await db.get_trades(market_id)
-                if t.get("time_slot") == time_slot]
+                if t.get("time_slot") == time_slot
+                and t.get("market_id") == market_id]
     if existing:
         logger.warning("market %s already cleared (%d trades) — skipping",
                        market_id, len(existing))
@@ -342,6 +382,21 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
     open_orders = [o for o in orders if o.get("status") == "Open"]
     bids = [o for o in open_orders if o.get("order_type") == "Bid"]
     offers = [o for o in open_orders if o.get("order_type") == "Offer"]
+
+    # One side per area and slot (D-58). The assumption is relied on in three
+    # places and was enforced in none: the Execution Node keys its measurement
+    # lookup on the area alone, so an area on both sides would have one meter
+    # reading read once as delivered and once as consumed; and an area posting
+    # on both sides passes the mutuality check against itself, which buys free
+    # preference priority. A configuration error, not a warning.
+    both_sides = sorted(
+        {b.get("area_uuid") for b in bids}
+        & {o.get("area_uuid") for o in offers})
+    if both_sides:
+        raise PreferenceConfigError(
+            "an area may hold only one side per market and slot, but "
+            f"{', '.join(map(str, both_sides))} posted both a Bid and an "
+            f"Offer in market {market_id} @ {time_slot}")
 
     # ---- Step 2: aggregate ---------------------------------------------
     total_supply_kwh = sum(o["energy"] for o in offers)
@@ -371,10 +426,12 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
 
     # ---- Step 4: record on-chain (must succeed before trades are written,
     #      guide §4.7) ----------------------------------------------------
-    tx_hash, clearing_price, recovered = await _anchor_or_recover(
+    anchor = await _anchor_or_recover(
         chain, market_id=market_id, community_uuid=community_uuid,
         time_slot=time_slot, total_supply_kwh=total_supply_kwh,
         total_demand_kwh=total_demand_kwh, clearing_price=clearing_price)
+    tx_hash = anchor["tx_hash"]
+    clearing_price = anchor["clearing_price"]
 
     # ---- Steps 5+6: allocation (preferred pairs + pro-rata residual) ----
     # `apply_preference_allocation` owns the whole allocation so a single
@@ -432,8 +489,12 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
                      "multipliers": multipliers.as_dict()},
         status="cleared",
         # Explicit, so a caller can tell a first clearing from one that
-        # continued an anchor left behind by a failed write-back.
-        recovered_from_anchor=recovered,
+        # continued an anchor left behind by a failed write-back — plus the
+        # recovery's own divergence keys (D-60) and the anchor-hash flag (#28).
+        **{key: anchor[key] for key in
+           ("recovered_from_anchor", "anchored_price_ct",
+            "recomputed_price_ct", "price_source",
+            "anchor_tx_hash_recovered")},
         community_name=trigger.get("community_name"),
         blockchain_mode=chain.mode,
     )

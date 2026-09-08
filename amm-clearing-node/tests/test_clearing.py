@@ -409,3 +409,128 @@ async def test_a_duplicate_revert_without_an_anchor_still_raises(cfg):
     db = FakeOffchainDB(demand_limited_orders())
     with pytest.raises(ContractError, match="already cleared"):
         await run_clearing(trigger(), cfg, db, AmnesiacChain())
+
+
+# ----------------------------------------- issue #26: the idempotency filter
+
+@pytest.mark.anyio
+async def test_a_foreign_market_trade_does_not_suppress_the_clearing(cfg):
+    """The production GSY API ignores the `market_id` query parameter.
+
+    `get_trades(market_id)` therefore returns foreign trades against a real
+    DB, and one with a matching `time_slot` would be read as "already
+    cleared" — a genuine clearing skipped in silence. The mock filters
+    server-side, so the leak only appears with a DB that does not.
+    """
+
+    class UnfilteredDB(FakeOffchainDB):
+        """Mirrors routes/trades.rs: the parameter is accepted and ignored."""
+
+        async def get_trades(self, market_id):
+            return self.foreign + [t for t in self.trades
+                                   if t["market_id"] == market_id]
+
+    db = UnfilteredDB(demand_limited_orders())
+    db.foreign = [{"trade_uuid": "0x" + "cc" * 32,
+                   "market_id": "0x" + "ee" * 32,   # another market
+                   "time_slot": SLOT,               # same slot
+                   "parameters": {"energy_rate": 99.0}}]
+
+    result = await run_clearing(trigger(), cfg, db, MockContractClient())
+
+    assert result["status"] == "cleared"
+    assert result["num_trades"] == 6
+    assert result["clearing_price_ct_per_kwh"] == pytest.approx(15.147225)
+
+
+# ------------------------------- D-60 / #28: what a recovery has to report
+
+class _AnchorAtChain(MockContractClient):
+    """A chain that reports "already cleared" and hands back a stored anchor.
+
+    `price` is what the anchor holds, `tx_hash` what its log read yields —
+    None models a node that prunes logs or refuses `fromBlock=0`.
+    """
+
+    def __init__(self, price, tx_hash="0x" + "dd" * 32):
+        super().__init__()
+        self._price = price
+        self._tx_hash = tx_hash
+
+    async def clear_market(self, **kwargs):
+        raise ContractError("AMMBA: market already cleared: x")
+
+    async def get_clearing_result(self, market_id):
+        return {"clearing_price": self._price, "tx_hash": self._tx_hash}
+
+
+@pytest.mark.anyio
+async def test_a_normal_run_reports_a_computed_price_source(cfg):
+    # The keys exist unconditionally, so a 672-slot campaign can group by them.
+    result = await run_clearing(trigger(), cfg,
+                                FakeOffchainDB(demand_limited_orders()),
+                                MockContractClient())
+
+    assert result["price_source"] == "computed"
+    assert result["anchored_price_ct"] is None
+    assert result["recomputed_price_ct"] is None
+    assert result["anchor_tx_hash_recovered"] is True
+
+
+@pytest.mark.anyio
+async def test_a_diverging_anchor_is_reported_not_only_logged(cfg):
+    """D-60: the anchor wins, and the divergence leaves the log.
+
+    In a recovery `clearMarket` reverts on the duplicate market *before* its
+    bounds check runs, so the recomputed price is the one no contract has
+    verified — the anchor is correctly kept. A 672-slot campaign cannot count
+    log lines, so both prices travel in the response.
+    """
+    db = FakeOffchainDB(demand_limited_orders())
+    result = await run_clearing(trigger(), cfg, db, _AnchorAtChain(14.0))
+
+    assert result["status"] == "cleared"
+    # behaviour is unchanged: the anchored value settles the round
+    assert result["clearing_price_ct_per_kwh"] == pytest.approx(14.0)
+    assert result["price_source"] == "anchor"
+    assert result["anchored_price_ct"] == pytest.approx(14.0)
+    assert result["recomputed_price_ct"] == pytest.approx(15.147225)
+    assert result["recovered_from_anchor"] is True
+    # the trades settle on the anchored price too
+    assert all(t["parameters"]["energy_rate"] == pytest.approx(14.0)
+               for t in db.trades)
+
+
+@pytest.mark.anyio
+async def test_an_agreeing_anchor_reports_both_prices_without_switching(cfg):
+    # Same on-chain integer: nothing diverged, so the recomputed value stays
+    # the settlement reference and `price_source` says so.
+    result = await run_clearing(trigger(), cfg,
+                                FakeOffchainDB(demand_limited_orders()),
+                                _AnchorAtChain(15.1472))
+
+    assert result["recovered_from_anchor"] is True
+    assert result["price_source"] == "computed"
+    assert result["clearing_price_ct_per_kwh"] == pytest.approx(15.147225)
+    assert result["anchored_price_ct"] == pytest.approx(15.1472)
+    assert result["recomputed_price_ct"] == pytest.approx(15.147225)
+
+
+@pytest.mark.anyio
+async def test_an_unrecoverable_anchor_hash_is_flagged_not_hidden(cfg):
+    """Issue #28: a trade written with an empty `amm_tx_hash`.
+
+    The contract stores the clearing result but not the hash of the
+    transaction that wrote it, so on recovery the hash comes only from the
+    `MarketCleared` log. A node that prunes logs yields nothing and the
+    record loses its audit link — the recovery is still valid, so the run
+    must not fail, but it must not look like an ordinary success either.
+    """
+    db = FakeOffchainDB(demand_limited_orders())
+    result = await run_clearing(trigger(), cfg, db,
+                                _AnchorAtChain(15.1472, tx_hash=None))
+
+    assert result["status"] == "cleared"        # the recovery completed
+    assert result["tx_hash"] is None
+    assert result["anchor_tx_hash_recovered"] is False
+    assert len(db.trades) == 6

@@ -1,5 +1,7 @@
 """Contract client behavior that the clearing tests do not exercise."""
 
+import importlib.util
+
 import pytest
 
 from src.config import CommunityParams
@@ -45,6 +47,16 @@ async def test_mock_client_clears_distinct_markets():
     assert len(chain.records) == 2
 
 
+# `web3` lives in requirements-live.txt, not requirements.txt. Installing only
+# the base requirements — the documented path, and what a CI or an examiner
+# cloning the repository does — turned the eight live-client tests below into
+# failures instead of skips: nothing is broken there, only the signal (#29).
+# The two mock-client tests above need no chain library and keep running.
+requires_web3 = pytest.mark.skipif(
+    importlib.util.find_spec("web3") is None,
+    reason="web3 is in requirements-live.txt, not requirements.txt")
+
+
 # ------------------------------------- on-chain parameter comparison (#17)
 
 class FakeContractCall:
@@ -85,6 +97,7 @@ def live_client(on_chain_result) -> Web3ContractClient:
     return client
 
 
+@requires_web3
 def test_verify_community_params_accepts_matching_values():
     local = CommunityParams()
     # The contract stores the parameters scaled by 10,000.
@@ -99,6 +112,7 @@ def test_verify_community_params_accepts_matching_values():
     assert len(client._contract.functions.called_with) == 32
 
 
+@requires_web3
 def test_verify_community_params_names_only_the_diverging_field():
     """#18: the message used to print `!=` for fields that agreed."""
     local = CommunityParams()
@@ -114,6 +128,7 @@ def test_verify_community_params_names_only_the_diverging_field():
         assert untouched not in message
 
 
+@requires_web3
 def test_verify_community_params_reports_every_diverging_field():
     local = CommunityParams()
     on_chain = [to_node_int(30.0), to_node_int(local.k_lower),
@@ -128,6 +143,7 @@ def test_verify_community_params_reports_every_diverging_field():
     assert "k_lower" not in message
 
 
+@requires_web3
 def test_unregistered_community_gets_an_actionable_error():
     revert = Exception("execution reverted: AMMBA: community params not set")
     with pytest.raises(ContractError, match="setCommunityParams"):
@@ -135,6 +151,7 @@ def test_unregistered_community_gets_an_actionable_error():
                                                           CommunityParams())
 
 
+@requires_web3
 def test_other_call_failures_are_normalized():
     with pytest.raises(ContractError, match="getCommunityParams"):
         live_client(Exception("connection refused"))._verify_community_params_sync(
@@ -168,6 +185,7 @@ def fee_client(max_priority_fee, base_fee=7,
     return client
 
 
+@requires_web3
 def test_fee_floor_applies_when_the_estimate_is_below_it():
     """The Volta failure: empty blocks estimate 0, so maxFeePerGas became 14
     wei, the transaction was never included and it blocked its own nonce."""
@@ -176,12 +194,14 @@ def test_fee_floor_applies_when_the_estimate_is_below_it():
     assert fees["maxFeePerGas"] == 1_000_000_000 + 14
 
 
+@requires_web3
 def test_a_higher_estimate_wins_over_the_floor():
     fees = fee_client(max_priority_fee=3_000_000_000)._fee_params()
     assert fees["maxPriorityFeePerGas"] == 3_000_000_000
     assert fees["maxFeePerGas"] == 3_000_000_000 + 14
 
 
+@requires_web3
 def test_a_node_without_max_priority_fee_falls_back_to_the_floor():
     # Not every node implements eth_maxPriorityFeePerGas.
     fees = fee_client(

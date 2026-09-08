@@ -238,7 +238,12 @@ def _summary_from_existing_trades(trades: list[dict], market_id: str,
         # is where an anchor lost to log pruning (#28) would show up.
         anchored_price_ct=None,
         recomputed_price_ct=None,
-        price_source="computed",
+        # Nothing was computed here: the price came out of
+        # `parameters.energy_rate` of trades an earlier run wrote. Calling
+        # that "computed" would let a campaign grouping by `price_source`
+        # count re-triggers as fresh clearings, which is the only reason the
+        # field exists.
+        price_source="stored",
         anchor_tx_hash_recovered=bool(params.get("amm_tx_hash")),
         message="trades already exist for this market_id + time_slot; "
                 "clearing is idempotent and was not re-run",
@@ -267,6 +272,18 @@ async def _anchor_or_recover(chain: BaseContractClient, *, market_id: str,
     settles on, and whether the anchor's transaction hash could be read back
     at all. `price_source` and `anchor_tx_hash_recovered` are present on every
     run, so a 672-slot campaign can group by them.
+
+    `price_source` names the provenance of the settled price, and a clearing
+    response reaches one on three paths:
+
+    * "computed" — the sigmoid produced it in this run. Both a first clearing
+      and a recovery whose anchor agrees with the recomputed value, where the
+      recomputed one is kept at its full precision.
+    * "anchor"   — a recovery found the on-chain anchor at a different price
+      and settled on it; the anchor is the value a contract has verified.
+    * "stored"   — nothing was computed: an idempotent re-trigger read the
+      price back out of trades an earlier run wrote. Set in
+      `_summary_from_existing_trades`, not here.
     """
     try:
         tx_hash = await chain.clear_market(

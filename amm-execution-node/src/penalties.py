@@ -14,7 +14,11 @@ Three penalty types from the simulation specification:
 falls back to the meter reading where a slot carries no forecast.
 """
 
+import logging
+
 from src.sigmoid import sigmoid_price
+
+logger = logging.getLogger("amm-execution-node.penalties")
 
 SUPPLY_LIMITED = "SUPPLY_LIMITED"
 DEMAND_LIMITED = "DEMAND_LIMITED"
@@ -119,11 +123,17 @@ def redistribution(rows: list[dict], clearing_price: float,
     compensated (D-61): a shortfall does not manipulate the price and is
     already penalised on its own axis.
 
+    `harmed_side_kwh` is the invariant that guards the harmed set itself:
+    every trade has the community pool on one side, so each market side trades
+    `traded_quantity_kwh` in total and the sum over the harmed role must match
+    it. With no deviator there is no harmed side, and the field is 0.0.
+
     No transfer is performed anywhere. D-25 keeps the payout mechanics out of
     the artifact; D-42 moves only the arithmetic into the node.
     """
     empty = {"rule": "proportional", "computed_only": True,
-             "harmed_side": None, "penalty_pool_ct": 0.0,
+             "harmed_side": None, "harmed_side_kwh": 0.0,
+             "penalty_pool_ct": 0.0,
              "compensated_ct": 0.0, "budget_balance_ct": 0.0,
              "excluded_deviators": [], "rows": []}
 
@@ -138,6 +148,25 @@ def redistribution(rows: list[dict], clearing_price: float,
     deviator_role = deviators[0]["role"]
     harmed_side = "buyer" if deviator_role == "seller" else "seller"
     excluded = [r.get("area_uuid") for r in deviators]
+
+    # Each market side trades Q_t in total (the pool is the counterparty of
+    # every trade), so this sum must equal `traded_quantity_kwh`. A result
+    # near 2·Q_t means the harmed set was taken across both sides — the defect
+    # this function was rewritten to avoid, and one that `budget_balance_ct`
+    # cannot reveal, because the pool is distributed in full either way.
+    # Summed over the whole role, before the deviator filter: the invariant is
+    # about the market side, not about who is eligible for compensation.
+    harmed_side_kwh = sum(float(r.get("traded_kwh", 0.0)) for r in rows
+                          if r.get("role") == harmed_side)
+    if (abs(harmed_side_kwh - traded_quantity_kwh)
+            > 1e-6 * max(1.0, traded_quantity_kwh)):
+        # Reported and logged, never raised: a violated invariant belongs in
+        # the output and not in an AssertionError that answers HTTP 500
+        # instead of a defined state (issue #14).
+        logger.warning("harmed side (%s) trades %.6f kWh but the round's "
+                       "traded quantity is %.6f — the harmed set may span "
+                       "both market sides", harmed_side, harmed_side_kwh,
+                       traded_quantity_kwh)
 
     harmed = [r for r in rows
               if r.get("role") == harmed_side
@@ -157,6 +186,7 @@ def redistribution(rows: list[dict], clearing_price: float,
     total_damage = sum(damage for _row, damage in damages)
     if total_damage <= _EPSILON:
         return {**empty, "harmed_side": harmed_side,
+                "harmed_side_kwh": round(harmed_side_kwh, 6),
                 "penalty_pool_ct": round(penalty_pool, 6),
                 "budget_balance_ct": round(penalty_pool, 6),
                 "excluded_deviators": excluded}
@@ -174,6 +204,7 @@ def redistribution(rows: list[dict], clearing_price: float,
         "rule": "proportional",
         "computed_only": True,
         "harmed_side": harmed_side,
+        "harmed_side_kwh": round(harmed_side_kwh, 6),
         "penalty_pool_ct": round(penalty_pool, 6),
         "compensated_ct": round(compensated, 6),
         "budget_balance_ct": round(penalty_pool - compensated, 6),

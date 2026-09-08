@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from src.penalties import (BALANCED, DEMAND_LIMITED, SUPPLY_LIMITED,
@@ -246,3 +248,65 @@ class TestRedistribution:
         areas = {r["area_uuid"] for r in result["rows"]}
         assert areas == {"area_h2"}
         assert "area_h1" in result["excluded_deviators"]
+
+    def test_the_harmed_side_sums_to_the_traded_quantity(self, caplog):
+        # The +-0 case above: one deviating seller, buyers holding 4 and 6 kWh
+        # against Q_t = 10. The pool is the counterparty of every trade, so
+        # the buyer side trades exactly Q_t.
+        rows = [
+            self._row("area_pv", "seller", 10.0, externality=10.0, p_cf=15.0),
+            self._row("area_h1", "buyer", 4.0),
+            self._row("area_h2", "buyer", 6.0),
+        ]
+        with caplog.at_level(logging.WARNING,
+                             logger="amm-execution-node.penalties"):
+            result = redistribution(rows, clearing_price=16.0,
+                                    traded_quantity_kwh=10.0)
+
+        assert result["harmed_side_kwh"] == pytest.approx(10.0)
+        assert result["harmed_side_kwh"] == pytest.approx(
+            result["compensated_ct"] / 1.0)   # damage is 1.0 ct/kWh here
+        assert caplog.records == []
+
+    def test_a_harmed_side_that_misses_the_traded_quantity_is_reported(
+            self, caplog):
+        """What the field is for.
+
+        If the harmed set were ever built from both market sides again — the
+        error the original specification contained — this sum would come out
+        at roughly 2*Q_t. `budget_balance_ct` cannot reveal that: the pool is
+        distributed in full either way and still reads 0.00. This is the only
+        place the mistake becomes visible.
+
+        Here the mismatch is forced from the other direction, by passing a
+        `traded_quantity_kwh` the rows do not support — the harmed side holds
+        10.0 kWh against a claimed Q_t of 20.0.
+        """
+        rows = [
+            self._row("area_pv", "seller", 10.0, externality=10.0, p_cf=15.0),
+            self._row("area_h1", "buyer", 4.0),
+            self._row("area_h2", "buyer", 6.0),
+        ]
+        with caplog.at_level(logging.WARNING,
+                             logger="amm-execution-node.penalties"):
+            result = redistribution(rows, clearing_price=16.0,
+                                    traded_quantity_kwh=20.0)
+
+        # the true sum, not the claimed one
+        assert result["harmed_side_kwh"] == pytest.approx(10.0)
+        assert len(caplog.records) == 1
+        assert "harmed set may span both market sides" in \
+            caplog.records[0].getMessage()
+        # reported, never raised: a violated invariant must not become a 500
+        assert result["budget_balance_ct"] == pytest.approx(0.0, abs=1e-6)
+
+    def test_a_round_without_deviators_reports_no_harmed_side_volume(self):
+        # No deviator means no harmed side, so there is no volume to sum.
+        rows = [self._row("area_pv", "seller", 10.0),
+                self._row("area_h1", "buyer", 10.0)]
+        result = redistribution(rows, clearing_price=16.0,
+                                traded_quantity_kwh=10.0)
+
+        assert result["harmed_side"] is None
+        assert result["harmed_side_kwh"] == 0.0
+

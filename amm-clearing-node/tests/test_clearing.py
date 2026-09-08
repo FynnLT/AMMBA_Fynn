@@ -227,6 +227,12 @@ async def test_clearing_is_idempotent(cfg):
     assert producers["PV A"]["allocated_kwh"] == pytest.approx(4.0)
     assert producers["PV A"]["requested_kwh"] == pytest.approx(5.0)
 
+    # Provenance: the re-trigger computed nothing, it read the price back out
+    # of the stored trades. A campaign grouping by `price_source` would
+    # otherwise count this as a fresh clearing.
+    assert first["price_source"] == "computed"
+    assert second["price_source"] == "stored"
+
 
 @pytest.mark.anyio
 async def test_both_paths_return_the_same_summary_shape(cfg):

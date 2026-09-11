@@ -20,3 +20,6 @@ Thumbs.db
 
 # Volta evidence output (results, not part of the artifact)
 amm-smart-contract/volta_evidence*.csv
+
+# Evaluation output (results, not part of the artifact)
+evaluation/out/

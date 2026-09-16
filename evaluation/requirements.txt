@@ -1,0 +1,11 @@
+# Evaluation harness only. Not part of the artifact, and deliberately kept
+# apart from the three services' requirements: nothing that ships depends on
+# any of this.
+#
+# The harness also imports the three services' own dependencies (fastapi,
+# httpx, pyyaml, pydantic) by loading their `src` packages in process; install
+# those from the service directories.
+openpyxl>=3.1,<4        # reads data/raw/*.xlsx, read-only
+matplotlib>=3.7,<4      # plots.py
+pytest>=8
+anyio>=4                # async tests, same idiom as the services

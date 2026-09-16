@@ -19,6 +19,7 @@ metered energy are penalized (shortfall + VCG-style externality penalties).
 | [amm-execution-node](amm-execution-node/) | Python · FastAPI | 8082 | Implemented |
 | [amm-smart-contract](amm-smart-contract/) | Solidity · Hardhat | — | Implemented + tested; *simulated* in the default stack |
 | [ui](ui/) | HTML/JS/CSS (no build step) | 3000 | Simulation & visualization for thesis demos |
+| [evaluation](evaluation/) | Python (no service) | — | Simulation harness for the thesis evaluation — **not part of the artifact** |
 
 ---
 

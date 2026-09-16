@@ -1,0 +1,64 @@
+LICENCE AND ATTRIBUTION FOR THE DATA IN THIS DIRECTORY
+======================================================
+
+This notice covers the files under `evaluation/data/` only. It does not
+apply to the source code of this repository.
+
+WORK
+----
+"A complete energy community dataset with photovoltaic generation, battery
+energy storage systems and electric vehicles" (version 1.5, 27 May 2024)
+
+Authors:  Ricardo Faia, Calvin Goncalves, Luis Gomes, Zita Vale
+Dataset:  https://doi.org/10.5281/zenodo.11351017
+Article:  Faia, R., Goncalves, C., Gomes, L., Vale, Z. (2023).
+          Dataset of an energy community with prosumer consumption,
+          photovoltaic generation, battery storage, and electric vehicles.
+          Data in Brief 48, 109218.
+          https://doi.org/10.1016/j.dib.2023.109218
+
+Retrieved: 16 September 2026
+
+LICENCE
+-------
+Creative Commons Attribution 4.0 International (CC BY 4.0).
+
+You are free to share and adapt the material for any purpose, including
+commercially, provided you give appropriate credit, link to the licence, and
+indicate whether changes were made.
+
+Licence deed:   https://creativecommons.org/licenses/by/4.0/
+Full legal code: https://creativecommons.org/licenses/by/4.0/legalcode
+
+CC BY 4.0 is not a copyleft licence. Including this dataset places no licence
+obligation on the source code of this repository.
+
+CHANGES MADE IN THIS REPOSITORY
+-------------------------------
+The published workbook is stored unmodified at
+
+    raw/EC_EV_dataset (fixed error).xlsx
+    SHA-256 f96ef125d1c0f49cf3288b17598c166062570c7baa6c4d2d25ac545813531c3a
+
+Derived data generated from it for the evaluation campaign are NOT part of the
+original work. They are produced by this repository's own code and are:
+
+  - a selection of 100 of the 250 players as the reference community;
+  - per-player net positions per market slot (load minus PV), rather than the
+    two separate series of the original;
+  - an extension of the original single day (96 periods) to a week
+    (672 slots) by a per-day multiplicative draw, with its own recorded seed;
+  - market areas derived from the battery parameter sheet, with a charging
+    rule that is a modelling assumption of this work and not part of the
+    dataset.
+
+Derived files live in `derived/` and are not committed. Any figure published
+from them is a result of this work, not of the cited dataset, and is reported
+as such.
+
+HOW TO CITE
+-----------
+Faia, R., Goncalves, C., Gomes, L., & Vale, Z. (2023). Dataset of an energy
+community with prosumer consumption, photovoltaic generation, battery storage,
+and electric vehicles. Data in Brief, 48, 109218.
+https://doi.org/10.1016/j.dib.2023.109218

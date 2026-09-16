@@ -33,5 +33,9 @@ amm-smart-contract/volta_evidence*.csv
 # Evaluation output (results, not part of the artifact)
 evaluation/out/
 
-# Derived evaluation data is handled by evaluation/data/derived/.gitignore,
-# which keeps the empty directory in the clone and ignores its contents.
+# Derived evaluation data: the 672-slot week, regenerated from data/raw/ plus
+# the extension seed recorded in the run manifest. The directory itself stays
+# in the clone because evaluation/data/derived/.gitignore is tracked; only its
+# contents are ignored.
+evaluation/data/derived/*
+!evaluation/data/derived/.gitignore

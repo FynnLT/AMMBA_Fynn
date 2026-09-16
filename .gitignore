@@ -4,12 +4,14 @@ __pycache__/
 .venv/
 .pytest_cache/
 
-# Node / Hardhat
-node_modules/
-artifacts/
-cache/
-typechain-types/
-coverage/
+# Node / Hardhat — scoped to the contract project, which is the only thing
+# in this repository that uses npm. Unscoped `cache/` or `artifacts/` would
+# swallow any directory of that name anywhere in the tree.
+amm-smart-contract/node_modules/
+amm-smart-contract/artifacts/
+amm-smart-contract/cache/
+amm-smart-contract/typechain-types/
+amm-smart-contract/coverage/
 
 # Environment / secrets
 .env
@@ -17,9 +19,19 @@ coverage/
 # OS / editor
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
+
+# Office lock files (Excel writes ~$name.xlsx next to an open workbook)
+~$*.xlsx
+~$*.xlsm
+~$*.docx
 
 # Volta evidence output (results, not part of the artifact)
 amm-smart-contract/volta_evidence*.csv
 
 # Evaluation output (results, not part of the artifact)
 evaluation/out/
+
+# Derived evaluation data is handled by evaluation/data/derived/.gitignore,
+# which keeps the empty directory in the clone and ignores its contents.

@@ -3,11 +3,30 @@
 Paths are derived from this file's own location so the harness runs on
 Windows as well as on the Linux sandbox the pilot used.
 """
-import asyncio, csv, json, logging, os, platform, statistics, subprocess, sys, time
+import asyncio, csv, itertools, json, logging, os, platform, statistics, subprocess, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
 import stack, scenario, runner
 logging.disable(logging.WARNING)
+
+# Every run_slot call names its community and its slot. The slot is the
+# position of the case in its block's parameter grid, so it is a function of
+# the parameters and not of call order -- re-running one cell lands in the
+# same slot it landed in before. The market id carries the community, because
+# the mock derives its own id from the slot alone and two blocks would
+# otherwise share an order book at the same grid position.
+BASE_SLOT = 1_757_000_000 // runner.SLOT_SEC * runner.SLOT_SEC
+
+
+def slot_at(index: int) -> int:
+    return BASE_SLOT + index * runner.SLOT_SEC
+
+
+async def run_case(st, scen, *, community, index, **kw):
+    slot = slot_at(index)
+    return await runner.run_slot(
+        st, scen, community=community, slot=slot,
+        market_id=runner.market_id_for(community, slot), **kw)
 
 HARNESS_DIR = Path(__file__).resolve().parent
 REPO = stack.REPO                      # the pinned clone next to the harness
@@ -67,13 +86,14 @@ def write_manifest(run_id, *, params, seeds, wall_sec, output_files, **extra):
 
 async def block_golden(st, rows):
     """A: reproduce the implementation-guide reference numbers."""
-    r = await runner.run_slot(st, scenario.GUIDE, preferences=PREF_OFF, execute=False)
+    r = await run_case(st, scenario.GUIDE, community="A-golden", index=0,
+                       preferences=PREF_OFF, execute=False)
     c = r["clearing"]
     rows.append({"case": "baseline_pro_rata", "price": c["clearing_price_ct_per_kwh"],
                  "ratio": c["ratio"], "round": c["round_type"],
                  **{p["name"]: p["fill_rate"] for p in c["allocations"]["producers"]}})
-    r2 = await runner.run_slot(st, scenario.GUIDE,
-                               preferences=prefs(multipliers_enabled=True), execute=False)
+    r2 = await run_case(st, scenario.GUIDE, community="A-golden", index=1,
+                        preferences=prefs(multipliers_enabled=True), execute=False)
     c2 = r2["clearing"]
     m = c2["preferences"]["multipliers"]
     rows.append({"case": "preferences_first_mult", "price": c2["clearing_price_ct_per_kwh"],
@@ -88,83 +108,84 @@ async def block_sd_sweep(st):
     """B: supply/demand ratio sweep, 100 participants, 5 seeds."""
     rows = []
     ratios = [round(0.60 + 0.05*i, 2) for i in range(21)]
-    for ratio in ratios:
-        for seed in range(5):
-            scen = scenario.make_scenario(seed=seed, n_prod=40, n_cons=60,
-                                          sd_ratio=ratio, pair_density=0.25)
-            r = await runner.run_slot(st, scen, preferences=prefs(), execute=False)
-            c = r["clearing"]
-            if c.get("status") != "cleared":
-                continue
-            prod = c["allocations"]["producers"]; cons = c["allocations"]["consumers"]
-            rows.append({
-                "sd_ratio": ratio, "seed": seed,
-                "price": c["clearing_price_ct_per_kwh"],
-                "ratio_actual": c["ratio"], "round": c["round_type"],
-                "supply": c["total_supply_kwh"], "demand": c["total_demand_kwh"],
-                "traded": min(c["total_supply_kwh"], c["total_demand_kwh"]),
-                "seller_fill_mean": statistics.mean(p["fill_rate"] for p in prod),
-                "buyer_fill_mean": statistics.mean(cc["fill_rate"] for cc in cons),
-                "seller_fill_min": min(p["fill_rate"] for p in prod),
-                "seller_fill_max": max(p["fill_rate"] for p in prod),
-            })
+    for index, (ratio, seed) in enumerate(itertools.product(ratios, range(5))):
+        scen = scenario.make_scenario(seed=seed, n_prod=40, n_cons=60,
+                                      sd_ratio=ratio, pair_density=0.25)
+        r = await run_case(st, scen, community="B-sd-sweep", index=index,
+                           preferences=prefs(), execute=False)
+        c = r["clearing"]
+        if c.get("status") != "cleared":
+            continue
+        prod = c["allocations"]["producers"]; cons = c["allocations"]["consumers"]
+        rows.append({
+            "sd_ratio": ratio, "seed": seed,
+            "price": c["clearing_price_ct_per_kwh"],
+            "ratio_actual": c["ratio"], "round": c["round_type"],
+            "supply": c["total_supply_kwh"], "demand": c["total_demand_kwh"],
+            "traded": min(c["total_supply_kwh"], c["total_demand_kwh"]),
+            "seller_fill_mean": statistics.mean(p["fill_rate"] for p in prod),
+            "buyer_fill_mean": statistics.mean(cc["fill_rate"] for cc in cons),
+            "seller_fill_min": min(p["fill_rate"] for p in prod),
+            "seller_fill_max": max(p["fill_rate"] for p in prod),
+        })
     return rows
 
 
 async def block_pairs(st):
     """C1: allocation effect. pair density x order, multipliers off."""
     rows = []
-    for density in (0.0, 0.10, 0.25, 0.50, 0.75, 1.0):
-        for order in ("pro_rata_first", "preferences_first"):
-            for seed in range(5):
-                scen = scenario.make_scenario(seed=seed, n_prod=40, n_cons=60,
-                                              sd_ratio=1.25, pair_density=density)
-                r = await runner.run_slot(st, scen, preferences=prefs(order=order),
-                                          execute=False)
-                c = r["clearing"]
-                prod = c["allocations"]["producers"]
-                matched = [p["fill_rate"] for p in prod if p["preference_matched"]]
-                unmatched = [p["fill_rate"] for p in prod if not p["preference_matched"]]
-                rows.append({
-                    "pair_density": density, "order": order, "seed": seed,
-                    "price": c["clearing_price_ct_per_kwh"],
-                    "n_pairs": len(c["preferences"]["mutual_pairs"]),
-                    "fill_matched": statistics.mean(matched) if matched else None,
-                    "fill_unmatched": statistics.mean(unmatched) if unmatched else None,
-                    "fill_all": statistics.mean(p["fill_rate"] for p in prod),
-                    "fill_sd": statistics.pstdev([p["fill_rate"] for p in prod]),
-                    "traded_total": round(sum(p["allocated_kwh"] for p in prod), 6),
-                })
+    grid = itertools.product((0.0, 0.10, 0.25, 0.50, 0.75, 1.0),
+                             ("pro_rata_first", "preferences_first"),
+                             range(5))
+    for index, (density, order, seed) in enumerate(grid):
+        scen = scenario.make_scenario(seed=seed, n_prod=40, n_cons=60,
+                                      sd_ratio=1.25, pair_density=density)
+        r = await run_case(st, scen, community="C1-pairs", index=index,
+                           preferences=prefs(order=order), execute=False)
+        c = r["clearing"]
+        prod = c["allocations"]["producers"]
+        matched = [p["fill_rate"] for p in prod if p["preference_matched"]]
+        unmatched = [p["fill_rate"] for p in prod if not p["preference_matched"]]
+        rows.append({
+            "pair_density": density, "order": order, "seed": seed,
+            "price": c["clearing_price_ct_per_kwh"],
+            "n_pairs": len(c["preferences"]["mutual_pairs"]),
+            "fill_matched": statistics.mean(matched) if matched else None,
+            "fill_unmatched": statistics.mean(unmatched) if unmatched else None,
+            "fill_all": statistics.mean(p["fill_rate"] for p in prod),
+            "fill_sd": statistics.pstdev([p["fill_rate"] for p in prod]),
+            "traded_total": round(sum(p["allocated_kwh"] for p in prod), 6),
+        })
     return rows
 
 
 async def block_multipliers(st):
     """C2: mode x sides x green_multiplier, guide reference scenario."""
     rows = []
-    grid = [round(0.005*i, 4) for i in range(0, 25)]   # 0.000 .. 0.120
-    for mode in ("multiplicative", "additive"):
-        for sides in ("seller", "both"):
-            for gm in grid:
-                r = await runner.run_slot(
-                    st, scenario.GUIDE,
-                    preferences=prefs(multipliers_enabled=True, mode=mode,
-                                      sides=sides, green_multiplier=gm,
-                                      grey_levy=0.10), execute=False)
-                c = r["clearing"]; m = c["preferences"]["multipliers"]
-                rows.append({
-                    "mode": mode, "sides": sides, "green_multiplier": gm,
-                    "price": c["clearing_price_ct_per_kwh"],
-                    "green_final": m["green_final_ct_per_kwh"],
-                    "grey_final": m["grey_final_ct_per_kwh"],
-                    "buyer_rate": m.get("buyer_final_ct_per_kwh"),
-                    "levy_collected_ct": m["levy_collected_ct"],
-                    "bonus_requested_ct": m["bonus_requested_ct"],
-                    "bonus_paid_ct": m["bonus_paid_ct"],
-                    "scale": m["scale"],
-                    "pool_surplus_ct": m["pool_surplus_ct"],
-                    "buyers_pay_ct": m["buyers_pay_ct"],
-                    "sellers_receive_ct": m.get("sellers_receive_ct"),
-                })
+    multipliers = [round(0.005*i, 4) for i in range(0, 25)]   # 0.000 .. 0.120
+    grid = itertools.product(("multiplicative", "additive"),
+                             ("seller", "both"), multipliers)
+    for index, (mode, sides, gm) in enumerate(grid):
+        r = await run_case(
+            st, scenario.GUIDE, community="C2-multipliers", index=index,
+            preferences=prefs(multipliers_enabled=True, mode=mode,
+                              sides=sides, green_multiplier=gm,
+                              grey_levy=0.10), execute=False)
+        c = r["clearing"]; m = c["preferences"]["multipliers"]
+        rows.append({
+            "mode": mode, "sides": sides, "green_multiplier": gm,
+            "price": c["clearing_price_ct_per_kwh"],
+            "green_final": m["green_final_ct_per_kwh"],
+            "grey_final": m["grey_final_ct_per_kwh"],
+            "buyer_rate": m.get("buyer_final_ct_per_kwh"),
+            "levy_collected_ct": m["levy_collected_ct"],
+            "bonus_requested_ct": m["bonus_requested_ct"],
+            "bonus_paid_ct": m["bonus_paid_ct"],
+            "scale": m["scale"],
+            "pool_surplus_ct": m["pool_surplus_ct"],
+            "buyers_pay_ct": m["buyers_pay_ct"],
+            "sellers_receive_ct": m.get("sellers_receive_ct"),
+        })
     return rows
 
 

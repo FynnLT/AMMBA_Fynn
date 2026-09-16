@@ -98,12 +98,29 @@ class Stack:
             cfg = replace(cfg, preferences=replace(cfg.preferences, **preferences))
         return await CLR["clearing"].run_clearing(trigger, cfg, self.db_clr, self.chain)
 
-    async def execute(self, trigger, gamma=None, eta=None):
+    async def execute(self, trigger, gamma=None, eta=None, eta_relative=None):
+        """`eta` is the absolute deadband in kWh, `eta_relative` the fraction
+        of the trade's own quantity.
+
+        Both keys have to be reachable from here: `execution.py:191` reads
+        `penalty_eta_relative * traded_kwh` and only falls back to
+        `penalty_eta_kwh` when the relative one is None. With the absolute key
+        as the harness's only channel, every run started here would be an
+        absolute-kWh run while Chapter 5 reports a deadband relative to the
+        traded quantity (D-26/D-44) -- and nothing would fail, because both
+        are valid configurations.
+        """
         cfg = self.cfg_exe
         kw = {}
         if gamma is not None: kw["penalty_gamma"] = gamma
         if eta is not None: kw["penalty_eta_kwh"] = eta
-        if kw: cfg = replace(cfg, **kw)
+        if eta_relative is not None: kw["penalty_eta_relative"] = eta_relative
+        if kw:
+            cfg = replace(cfg, **kw)
+            # `replace` bypasses `load_config`, which is where the service
+            # validates the relative deadband. Call the service's own check
+            # rather than restating the rule here; it has no public name.
+            EXE["config"]._validate(cfg)
         return await EXE["execution"].run_execution(trigger, cfg, self.db_exe)
 
 

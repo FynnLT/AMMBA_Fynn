@@ -20,13 +20,19 @@ logging.disable(logging.WARNING)  # the execution node logs one line per area wi
 EXPECTED_PRICE = 15.147274
 EXPECTED_TRADES = 100
 
+# Fixed, not derived from the clock or from a counter: the smoke test is a
+# regression check, so the slot it clears has to be the same one every time.
+SMOKE_COMMUNITY = "smoke-community"
+SMOKE_SLOT = 1_757_000_000 // runner.SLOT_SEC * runner.SLOT_SEC
+
 
 async def main() -> None:
     print("REPO resolved to:", stack.REPO)
 
     st = stack.Stack()
     scen = scenario.make_scenario(seed=0, n_prod=40, n_cons=60, sd_ratio=1.25)
-    res = await runner.run_slot(st, scen, execute=True)
+    res = await runner.run_slot(st, scen, community=SMOKE_COMMUNITY,
+                                slot=SMOKE_SLOT, execute=True)
 
     clearing = res["clearing"]
     execution = res["execution"]

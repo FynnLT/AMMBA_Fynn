@@ -1,5 +1,10 @@
 """Block D, corrected: withholding economics need the outside value of the
 withheld energy. Without it, withholding is pure volume loss."""
+# FROZEN at the 02.09.2026 test run. Runs against `git checkout fe52d63`,
+# not against the current runner signature: `run_slot` now requires an
+# explicit community and slot, and these scripts call it positionally.
+# No Chapter 5 result depends on them -- they produced the 02.09. test-run
+# figures only. Do not adapt them; do not import them from live code.
 import asyncio, csv, logging, os, statistics, random
 from pathlib import Path
 import stack, scenario, runner

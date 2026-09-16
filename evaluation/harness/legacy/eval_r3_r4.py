@@ -6,6 +6,11 @@ quantity here has to be exact (a fixed ratio, a fixed capacity, a fixed
 under-report), and the generator's log-normal draws would only add noise to
 numbers that are meant to be read off directly.
 """
+# FROZEN at the 02.09.2026 test run. Runs against `git checkout fe52d63`,
+# not against the current runner signature: `run_slot` now requires an
+# explicit community and slot, and these scripts call it positionally.
+# No Chapter 5 result depends on them -- they produced the 02.09. test-run
+# figures only. Do not adapt them; do not import them from live code.
 import asyncio, statistics, sys, time
 
 import stack, scenario, runner, campaign

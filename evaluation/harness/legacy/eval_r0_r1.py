@@ -6,6 +6,11 @@ next to the harness; the pinned clone in `AMMBA_Fynn/` is only ever read from.
 R0 must pass before R1 runs: R1 compares two parameter sets, and that is only
 interpretable if the code still computes what the vault records.
 """
+# FROZEN at the 02.09.2026 test run. Runs against `git checkout fe52d63`,
+# not against the current runner signature: `run_slot` now requires an
+# explicit community and slot, and these scripts call it positionally.
+# No Chapter 5 result depends on them -- they produced the 02.09. test-run
+# figures only. Do not adapt them; do not import them from live code.
 import asyncio, statistics, sys, time
 from pathlib import Path
 

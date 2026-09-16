@@ -9,6 +9,11 @@ Breaker 1  non-additive counterfactuals with several deviators
 Breaker 2  the deviator is compensated for damage he caused
 Breaker 3  rounding at the x10,000 on-chain scaling
 """
+# FROZEN at the 02.09.2026 test run. Runs against `git checkout fe52d63`,
+# not against the current runner signature: `run_slot` now requires an
+# explicit community and slot, and these scripts call it positionally.
+# No Chapter 5 result depends on them -- they produced the 02.09. test-run
+# figures only. Do not adapt them; do not import them from live code.
 import asyncio, random, statistics, sys, time
 
 import stack, scenario, runner, campaign, blockd

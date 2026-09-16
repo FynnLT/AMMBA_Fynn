@@ -278,6 +278,10 @@ async def execute_run(spec: RunSpec, *, out_dir=None, sha: str = None) -> dict:
     checks = preflight(records, minimum=spec.min_ratio_spread)
     csv_path = aggregates.write_slot_csv(out_dir / f"{spec.run_id}_slots.csv",
                                          records)
+    # One manifest per run directory, not one shared file. A campaign runs one
+    # process per run, and `write_manifest` is a read-modify-write: two workers
+    # appending to a single manifest.json would lose entries silently, which is
+    # the one failure this file exists to prevent.
     manifest = write_manifest(
         out_dir / "manifest.json", spec.run_id, config=spec.config(),
         seed=spec.seed, dataset_extension_seed=spec.dataset_extension_seed,

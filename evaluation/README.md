@@ -57,14 +57,25 @@ actually reached a figure; do not weaken them.
 
 ```bash
 cd evaluation/harness
-python campaign.py
+python campaign.py            # the profile campaign: 4 cells x 5 seeds
+python campaign.py --pilot    # the 02.09. synthetic blocks, which plots.py reads
 ```
 
-A campaign runs one process per run (`multiprocessing`, spawn), each worker
-building its own `Stack` and therefore its own empty store, with five seeds per
-cell recorded individually. `runs.RunSpec` carries everything a run depends on;
-`runs.execute_run` builds the stack, walks the week, writes the CSVs, writes
-the manifest and runs the pre-flight checks.
+A campaign runs one process per run (`multiprocessing`, **spawn**), each worker
+building its own `Stack` and therefore its own empty store. That is what makes
+the process boundary a substitute for reset choreography and slot offsets:
+there is no shared order book for two runs to collide in. Five seeds per cell,
+recorded individually (D-59). `runs.RunSpec` carries everything a run depends
+on; `runs.execute_run` builds the stack, walks the week, writes the CSVs,
+writes the manifest and runs the pre-flight checks — including
+`check_ratio_spread`, which sits on the campaign path rather than merely being
+importable.
+
+**Preferences and sigmoid parameters go through the trigger**
+(`trigger["preference_params"]`, `trigger["sigmoid_params"]`), which
+`run_clearing` resolves. `Stack.clear(preferences=…)` is not used in campaign
+runs: two ways of setting the same thing is how a manifest stops describing the
+run it names.
 
 ## Where output lands
 

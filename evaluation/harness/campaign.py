@@ -1,12 +1,32 @@
-"""Pilot campaign. Writes tidy CSVs into out/.
+"""The campaign: one process per run, five seeds per cell. Writes into out/.
+
+Run isolation is by process, not by bookkeeping. `stack.py` rewrites
+`sys.modules` at import time to load the three `src` packages side by side,
+which is not safe concurrently in one interpreter but is perfectly safe once
+per process -- so every run gets its own interpreter, its own `Stack` and
+therefore its own empty store. That removes the `market_id` collision question
+entirely: no reset choreography between runs, no slot offsets to keep two runs
+out of each other's order books.
+
+The start method is **spawn**, not fork: it is the only one Windows has, and
+under fork a child would inherit the parent's already-rewritten `sys.modules`
+and the three packages would be half-loaded rather than freshly loaded.
+
+**Parameter passing has one convention.** Preferences and sigmoid parameters
+go through the trigger -- `trigger["preference_params"]` and
+`trigger["sigmoid_params"]`, which `run_clearing` resolves at
+`amm-clearing-node/src/clearing.py:371-372`. `Stack.clear(preferences=...)`
+is not used in campaign runs: two ways of setting the same thing is how a
+manifest stops describing the run it names.
 
 Paths are derived from this file's own location so the harness runs on
 Windows as well as on the Linux sandbox the pilot used.
 """
-import asyncio, csv, itertools, json, logging, os, platform, statistics, subprocess, sys, time
+import asyncio, csv, functools, itertools, json, logging, multiprocessing
+import platform, statistics, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
-import stack, scenario, runner
+import runner, runs, scenario, stack
 logging.disable(logging.WARNING)
 
 # Every run_slot call names its community and its slot. The slot is the
@@ -32,9 +52,18 @@ HARNESS_DIR = Path(__file__).resolve().parent
 REPO = stack.REPO                      # the pinned clone next to the harness
 OUT = HARNESS_DIR.parent / "out"
 OUT.mkdir(parents=True, exist_ok=True)
-SHA = subprocess.check_output(["git", "-C", str(REPO), "rev-parse", "HEAD"],
-                              text=True).strip()
 MANIFEST = OUT / "manifest.json"
+
+
+@functools.lru_cache(maxsize=1)
+def repo_sha() -> str:
+    """Resolved on demand, not at import.
+
+    Under spawn every worker re-imports this module, and an import-time
+    `git rev-parse` would be one subprocess per worker. The parent resolves it
+    once and hands it down.
+    """
+    return runs.repo_sha()
 
 PREF_OFF = {"enabled": False, "multipliers_enabled": False}
 def prefs(**kw):
@@ -61,7 +90,7 @@ def write_manifest(run_id, *, params, seeds, wall_sec, output_files, **extra):
     entry = {
         "run_id": run_id,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "repo_sha": SHA,
+        "repo_sha": repo_sha(),
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "params": params,
@@ -70,16 +99,16 @@ def write_manifest(run_id, *, params, seeds, wall_sec, output_files, **extra):
         "output_files": [str(Path(f).name) for f in output_files],
     }
     entry.update(extra)
-    runs = []
+    entries = []
     if MANIFEST.exists():
         try:
-            runs = json.loads(MANIFEST.read_text(encoding="utf-8"))
+            entries = json.loads(MANIFEST.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            runs = []
-        if not isinstance(runs, list):
-            runs = [runs]
-    runs.append(entry)
-    MANIFEST.write_text(json.dumps(runs, indent=2), encoding="utf-8")
+            entries = []
+        if not isinstance(entries, list):
+            entries = [entries]
+    entries.append(entry)
+    MANIFEST.write_text(json.dumps(entries, indent=2), encoding="utf-8")
     print(f"  -> manifest.json  (+{run_id})")
     return entry
 
@@ -189,10 +218,115 @@ async def block_multipliers(st):
     return rows
 
 
+# =====================================================================
+# The campaign: one process per run, five seeds per cell
+# =====================================================================
+
+# D-59. Five per cell, and they are written into the manifest one by one
+# rather than as "seeds 0-4", so a single deviating cell can be re-run alone.
+SEEDS = (0, 1, 2, 3, 4)
+
+# Each replicate runs over its own week: the seed picks the dataset extension
+# draw, which is the only stochastic input a profile run has. Recorded in the
+# manifest as `dataset_extension_seed`.
+EXTENSION_SEED_BASE = 4242
+
+# The delta baseline, named once here and once in the manifest, and never
+# re-derived per table: pro-rata with preferences disabled, at the calibrated
+# theta/steepness.
+#
+# None until T-19 fits it. Note what that means: `run_slot` then falls back to
+# `runner.SIGMOID` and sends *that* as the trigger's `sigmoid_params`, which
+# `resolve_community` merges over the configured community parameters. So the
+# runs below are at the harness default (theta 1.0, steepness 2.5), not at the
+# community configuration -- and every manifest entry records which, because
+# the clearing response carries `sigmoid_params` back.
+CALIBRATED_SIGMOID = None
+BASELINE_PREFERENCES = dict(PREF_OFF)
+
+
+def spec_for(cell: str, seed: int, **overrides) -> runs.RunSpec:
+    """One run of one cell. Everything it depends on is in the spec."""
+    params = dict(
+        run_id=f"{cell}--seed-{seed}", seed=seed, cell=cell, cell_seeds=SEEDS,
+        dataset_extension_seed=EXTENSION_SEED_BASE + seed,
+        sigmoid=CALIBRATED_SIGMOID, baseline=runs.BASELINE)
+    params.update(overrides)
+    return runs.RunSpec(**params)
+
+
+def cells() -> list:
+    """The campaign grid: every cell at all five seeds.
+
+    The first cell is the delta baseline itself, so it is produced by the same
+    code path as everything it is subtracted from.
+    """
+    grid = {
+        "baseline_pro_rata": {"preferences": BASELINE_PREFERENCES},
+        "preferences_first": {"preferences": prefs(order="preferences_first")},
+        "pro_rata_first": {"preferences": prefs(order="pro_rata_first")},
+        "multipliers_on": {"preferences": prefs(multipliers_enabled=True)},
+    }
+    return [spec_for(cell, seed, **overrides)
+            for cell, overrides in grid.items() for seed in SEEDS]
+
+
+def _worker(payload):
+    """Spawn entry point. One process, one `Stack`, one empty store.
+
+    Kept at module level and given only picklable arguments, because spawn
+    re-imports this module in the child and looks the function up by name.
+    """
+    spec, sha = payload
+    logging.disable(logging.WARNING)
+    return runs.run_one(spec, sha=sha)
+
+
+def run_parallel(specs, *, processes=None, sha=None) -> list:
+    """One process per run, spawn start method."""
+    sha = sha or repo_sha()
+    context = multiprocessing.get_context("spawn")
+    processes = processes or min(len(specs), multiprocessing.cpu_count())
+    with context.Pool(processes) as pool:
+        return pool.map(_worker, [(spec, sha) for spec in specs])
+
+
+def run_sequential(specs, *, sha=None) -> list:
+    """The same runs in this interpreter. The comparison path for the
+    parallel one -- identical results, more wall clock."""
+    sha = sha or repo_sha()
+    return [runs.run_one(spec, sha=sha) for spec in specs]
+
+
+def report(results) -> None:
+    """Every run's guards, printed. `check_ratio_spread` runs inside
+    `runs.execute_run`, so a cell that never varied never gets this far --
+    a guard that is never called is not a guard."""
+    for result in results:
+        checks = result["checks"]
+        print(f"  {result['run_id']:<32} "
+              f"slots={checks['n_slots']:<4} "
+              f"ratio_span={checks['ratio_span']:<10} "
+              f"{checks['round_type_census']}")
+
+
 async def main():
+    """The profile campaign: every cell at five seeds, one process per run."""
+    started = time.perf_counter()
+    specs = cells()
+    print(f"campaign: {len(specs)} runs "
+          f"({len(specs) // len(SEEDS)} cells x {len(SEEDS)} seeds), "
+          f"one process each")
+    results = run_parallel(specs)
+    report(results)
+    print(f"\n{len(results)} runs in {time.perf_counter() - started:.1f}s")
+    print(f"manifests under {OUT}")
+
+
+async def pilot_main():
     t0 = time.perf_counter()
     st = stack.Stack()
-    manifest = {"repo_sha": SHA, "timestamp": int(time.time()),
+    manifest = {"repo_sha": repo_sha(), "timestamp": int(time.time()),
                 "python": sys.version.split()[0]}
 
     print("A golden run")
@@ -219,6 +353,12 @@ async def main():
 
 
 if __name__ == "__main__":
-    # Guarded so R0/R1 can import `block_golden` without running the whole
-    # pilot campaign as a side effect of the import.
-    asyncio.run(main())
+    # Guarded, and it has to be: under spawn the child re-imports this module,
+    # and unguarded top-level work would start the campaign again in every
+    # worker.
+    if "--pilot" in sys.argv:
+        # The 02.09. synthetic blocks. They are what plots.py reads, so they
+        # stay runnable; they are not the profile campaign.
+        asyncio.run(pilot_main())
+    else:
+        asyncio.run(main())

@@ -231,6 +231,23 @@ SEEDS = (0, 1, 2, 3, 4)
 # manifest as `dataset_extension_seed`.
 EXTENSION_SEED_BASE = 4242
 
+# D-76. The participation every cell runs at unless it is the axis being
+# varied. It is set explicitly in `spec_for` rather than left to the
+# `RunSpec` default, so each manifest records the value the run actually used
+# instead of whatever the dataclass happened to default to when it ran -- the
+# green-share axis below changes this per cell, and a reader comparing two
+# manifests has to be able to see that from the entries alone.
+REFERENCE_PARTICIPATION = 0.25
+
+# The green-share axis as its own cell group (D-76). Deliberately not a factor
+# over the four cells above: crossing them would turn block 1 into twenty
+# cells and answer a question nobody asked, while what 5.1 needs is one axis
+# varied against a fixed preference set. `green_share_025` therefore repeats
+# the baseline cell's configuration under its own name -- the redundancy is
+# the point, because the axis has to be readable as five comparable runs
+# without the reader reaching into another cell group for its middle point.
+GREEN_SHARES = (0.0, 0.25, 0.50, 0.75, 1.0)
+
 # The delta baseline, named once here and once in the manifest, and never
 # re-derived per table: pro-rata with preferences disabled, at the calibrated
 # theta/steepness.
@@ -250,6 +267,7 @@ def spec_for(cell: str, seed: int, **overrides) -> runs.RunSpec:
     params = dict(
         run_id=f"{cell}--seed-{seed}", seed=seed, cell=cell, cell_seeds=SEEDS,
         dataset_extension_seed=EXTENSION_SEED_BASE + seed,
+        participation=REFERENCE_PARTICIPATION,
         sigmoid=CALIBRATED_SIGMOID, baseline=runs.BASELINE)
     params.update(overrides)
     return runs.RunSpec(**params)
@@ -267,6 +285,18 @@ def cells() -> list:
         "pro_rata_first": {"preferences": prefs(order="pro_rata_first")},
         "multipliers_on": {"preferences": prefs(multipliers_enabled=True)},
     }
+    # The green-share axis: five cells at the baseline preference set, varying
+    # nothing but `participation`. Note that `green_share_000` fits on fewer
+    # slots than the rest -- with no battery areas the community has no supply
+    # at all in the evening periods the rule discharges into, so roughly 262
+    # of 672 slots trade against roughly 353 elsewhere. Both round types still
+    # occur and the ratio span is unchanged, so it passes pre-flight; but a
+    # table that puts its per-slot means next to the other four cells is
+    # comparing different numbers of slots and has to say so.
+    grid.update({
+        f"green_share_{int(share * 100):03d}": {
+            "preferences": BASELINE_PREFERENCES, "participation": share}
+        for share in GREEN_SHARES})
     return [spec_for(cell, seed, **overrides)
             for cell, overrides in grid.items() for seed in SEEDS]
 

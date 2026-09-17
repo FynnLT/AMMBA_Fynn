@@ -76,7 +76,16 @@ class RunSpec:
     battery_seed: int = 7
     n_players: int = 100
     days: int = 7
-    participation: float = 1.0
+    # D-76: the green-share axis, and 0.25 is the reference point every run
+    # sits at unless its cell varies it. Not 1.0, because the battery charging
+    # rule is a declared assumption (D-75) rather than data, and at full
+    # participation it dominates the market it is meant to be one component
+    # of. Measured on the reference week (extension seed 4242, 100 players, 59
+    # eligible units): the rule supplies 52.8 % of posted energy at
+    # participation 1.0 and 20.9 % at 0.25, over the identical 353 tradeable
+    # slots -- the axis changes what supply is made of without changing how
+    # much of the week can trade at all.
+    participation: float = 0.25
     preferences: dict = None
     sigmoid: dict = None
     gamma: float = None

@@ -72,4 +72,4 @@ default_community:
   k_upper_ct_per_kwh: 40.0
   k_lower_ct_per_kwh: 8.0
   theta: 1.0
-  steepness: 2.5
+  steepness: 0.6

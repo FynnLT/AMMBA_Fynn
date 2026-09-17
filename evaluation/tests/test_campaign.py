@@ -12,11 +12,15 @@ HARNESS = Path(__file__).resolve().parent.parent / "harness"
 def test_five_seeds_per_cell_recorded_individually():
     """D-59. Not "seeds 0-4": one deviating cell has to be re-runnable."""
     specs = campaign.cells()
-    assert len(specs) == 20
+    # Four mechanism cells plus the five-point green-share axis (D-76), all at
+    # five seeds. Written out rather than derived from `cells()` itself: a
+    # count computed from the grid under test cannot notice the grid losing a
+    # cell.
+    assert len(specs) == 45
     by_cell = {}
     for spec in specs:
         by_cell.setdefault(spec.cell, []).append(spec.seed)
-    assert len(by_cell) == 4
+    assert len(by_cell) == 9
     for cell, seeds in by_cell.items():
         assert seeds == list(campaign.SEEDS), cell
     assert all(spec.cell_seeds == campaign.SEEDS for spec in specs)
@@ -24,7 +28,34 @@ def test_five_seeds_per_cell_recorded_individually():
     # profile run has.
     extension_seeds = {s.dataset_extension_seed for s in specs}
     assert len(extension_seeds) == len(campaign.SEEDS)
-    assert len({s.run_id for s in specs}) == 20
+    assert len({s.run_id for s in specs}) == 45
+
+
+def test_the_green_share_axis_varies_participation_and_nothing_else():
+    """D-76. The axis is only an axis if one thing moves along it.
+
+    The four mechanism cells stay at the reference participation, so a change
+    measured along this axis cannot be confused with one measured across the
+    preference variants.
+    """
+    specs = campaign.cells()
+    axis = [s for s in specs if s.cell.startswith("green_share_")]
+    assert len(axis) == len(campaign.GREEN_SHARES) * len(campaign.SEEDS)
+
+    by_cell = {}
+    for spec in axis:
+        by_cell.setdefault(spec.cell, []).append(spec)
+    assert sorted(by_cell) == ["green_share_000", "green_share_025",
+                               "green_share_050", "green_share_075",
+                               "green_share_100"]
+    assert {run.participation for cell in by_cell.values() for run in cell} == \
+        set(campaign.GREEN_SHARES)
+    # Nothing but participation moves: same preference set as the baseline
+    assert all(s.preferences == campaign.BASELINE_PREFERENCES for s in axis)
+
+    mechanism = [s for s in specs if not s.cell.startswith("green_share_")]
+    assert all(s.participation == campaign.REFERENCE_PARTICIPATION
+               for s in mechanism)
 
 
 def test_the_delta_baseline_is_named_once():

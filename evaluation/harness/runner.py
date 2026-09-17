@@ -48,7 +48,8 @@ def areas_for(scen: dict) -> list[dict]:
 async def run_slot(st, scen, *, community, slot, market_id=None,
                    preferences=None, measurements=None, gamma=None, eta=None,
                    eta_relative=None, execute=True, sigmoid=None,
-                   forecasts=None, areas=None, community_name="Pilot"):
+                   forecasts=None, deviate=None, areas=None,
+                   community_name="Pilot"):
     """Create market + orders, clear, optionally measure and execute.
 
     `community` and `slot` are required: they place the call on a time axis
@@ -83,8 +84,21 @@ async def run_slot(st, scen, *, community, slot, market_id=None,
     through the trigger's `sigmoid_params` (the clearing node's
     `resolve_community` merges it onto the configured community parameters).
     Defaults to SIGMOID, so existing call sites are unaffected.
+
+    `deviate(clearing, slot) -> (measurements, forecasts)`: the per-slot
+    measurement channel. Called **between clearing and execution**, because
+    every delivered quantity a deviation produces is relative to what the
+    slot allocated, and only the clearing response knows that. This is the
+    keyword a sequence needs: `run_sequence` forwards `**kw` unchanged to
+    every slot, so a `measurements=` dict would be the same dict in all 672
+    of them. Passing both is an error -- two ways of setting the same thing
+    is how a manifest stops describing the run it names.
     """
     slot = int(slot)
+    if deviate is not None and (measurements or forecasts):
+        raise ValueError(
+            "run_slot takes either `measurements`/`forecasts` or `deviate`, "
+            "not both: they are two ways of setting the same channel")
     if areas is None:
         areas = areas_for(scen)
     market_payload = {"community_uuid": community,
@@ -127,6 +141,8 @@ async def run_slot(st, scen, *, community, slot, market_id=None,
 
     execution = None
     if execute and clearing.get("status") == "cleared":
+        if deviate is not None:
+            measurements, forecasts = deviate(clearing, slot)
         if measurements:
             rows = [{"community_uuid": community, "area_uuid": a,
                      "time_slot": slot, "energy_kwh": kwh}
@@ -155,11 +171,20 @@ async def run_slot(st, scen, *, community, slot, market_id=None,
             {"market_id": mid, "community_uuid": community, "time_slot": slot},
             gamma=gamma, eta=eta, eta_relative=eta_relative)
     return {"market_id": mid, "community": community, "time_slot": slot,
-            "clearing": clearing, "execution": execution}
+            "clearing": clearing, "execution": execution,
+            # What the scenario builder knew and the responses cannot carry:
+            # a pair that could not be posted leaves no trace in the clearing
+            # result, because from the artifact's side it never existed. Kept
+            # in its own sub-dict rather than at top level, so a record stays
+            # readable as "what the pipeline answered" plus "what it was
+            # asked".
+            "scenario": {"pairs_posted": scen.get("pairs_posted"),
+                         "pairs_unpostable": scen.get("pairs_unpostable"),
+                         "pairs_mutual": scen.get("pairs_mutual")}}
 
 
 async def run_sequence(st, community, slots, scenario_for_slot,
-                       **kw) -> list[dict]:
+                       deviate=None, **kw) -> list[dict]:
     """One community over a contiguous list of slots, one record per slot.
 
     `scenario_for_slot(index, slot)` returns the scenario for position
@@ -172,6 +197,11 @@ async def run_sequence(st, community, slots, scenario_for_slot,
     slot because its id changes with the slot; unless the caller supplies
     `market_id`, that id is namespaced by community so a second community
     over the same slots cannot share the order book.
+
+    `deviate` is named explicitly rather than left to `**kw` so it is
+    obvious that it is the *one* per-slot argument here: everything else in
+    `**kw` is a run-level setting and is correctly the same object in all 672
+    slots, which is exactly why a `measurements=` dict cannot be.
     """
     slots = [int(s) for s in slots]
     areas = kw.pop("areas", None)
@@ -184,5 +214,5 @@ async def run_sequence(st, community, slots, scenario_for_slot,
         records.append(await run_slot(
             st, scen, community=community, slot=slot,
             market_id=explicit_market_id or market_id_for(community, slot),
-            areas=areas, **kw))
+            areas=areas, deviate=deviate, **kw))
     return records

@@ -14,6 +14,7 @@ that produced numbers and had to be thrown away:
 * a measurement channel that silently rejects writes returns null penalties
   that read like findings (`assert_measurement_round_trip`).
 """
+import functools
 import json
 import platform
 import subprocess
@@ -24,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import aggregates
+import deviations
 import profiles
 import runner
 import scenario
@@ -86,6 +88,14 @@ class RunSpec:
     # slots -- the axis changes what supply is made of without changing how
     # much of the week can trade at all.
     participation: float = 0.25
+    # D-71/D-81. The preference density axis of block 1. The relationships are
+    # drawn once per run from `preference_seed` and held over the week, so a
+    # run is reproducible from the spec alone -- `named_share = 0` reproduces
+    # the first pass, where the profile path posted no preference at all and
+    # every preference cell cleared a book with zero pairs.
+    named_share: float = 0.0
+    mutual_share: float = 0.5
+    preference_seed: int = 20260918
     preferences: dict = None
     sigmoid: dict = None
     gamma: float = None
@@ -93,6 +103,14 @@ class RunSpec:
     baseline: str = BASELINE
     day_start: int = DAY_START
     execute: bool = False
+    # D-72. Block 2's axis, and None means "no deviation layer at all", not
+    # "the noise-only arm": a block-1 run must not depend on the deviation
+    # seed. `{"sigma": 0.05, "arm": "none" | "sellers_withhold" |
+    # "buyers_underreport", "share": 0.25, "k": 1, "seed": 20260919}`.
+    # `arm = "none"` at sigma > 0 is the accidental layer on its own, which
+    # is the reference the two strategic arms are read against.
+    deviation: dict = None
+    deviation_seed: int = 20260919
     workbook: str = None
     out_dir: str = None
     min_ratio_spread: float = 0.25
@@ -232,7 +250,15 @@ def write_manifest(path, run_id: str, *, config: dict, seed: int,
 # --------------------------------------------------------------- the run
 
 def build_week(spec: RunSpec):
-    """The profiles side of a run: community, draw, week, battery areas."""
+    """The profiles side of a run: community, draw, week, battery areas and
+    the run's held preference draw.
+
+    The preferences are drawn here, once, and handed to every slot's
+    `make_scenario_from_profiles` call: they are a property of the run, like
+    community membership, not of the slot (D-81). `named_share = 0` draws
+    nothing at all rather than an empty draw, so the baseline cell does not
+    depend on `preference_seed`.
+    """
     community = profiles.load_community(
         spec.workbook or profiles.DEFAULT_WORKBOOK)
     players = profiles.select_players(community.flags, n=spec.n_players,
@@ -243,7 +269,12 @@ def build_week(spec: RunSpec):
     batteries = profiles.make_battery_areas(
         community.bess, players, participation=spec.participation,
         seed=spec.battery_seed)
-    return community, players, week, batteries
+    # Households only: a battery area never names and is never named (D-75).
+    preferences = (scenario.draw_preferences(
+        players, named_share=spec.named_share,
+        mutual_share=spec.mutual_share, seed=spec.preference_seed)
+        if spec.named_share > 0 else {})
+    return community, players, week, batteries, preferences
 
 
 def run_areas(players, batteries) -> list:
@@ -266,10 +297,16 @@ async def execute_run(spec: RunSpec, *, out_dir=None, sha: str = None) -> dict:
     out_dir = Path(out_dir or spec.out_dir or (OUT / spec.run_id))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    community, players, week, batteries = build_week(spec)
-    scenarios = [scenario.make_scenario_from_profiles(week, index, batteries)
+    community, players, week, batteries, preferences = build_week(spec)
+    scenarios = [scenario.make_scenario_from_profiles(week, index, batteries,
+                                                      preferences=preferences)
                  for index in range(week.n_slots)]
     slots = profiles.slot_times(week, spec.day_start)
+
+    # Built before the stack, so a misconfigured arm fails the run before it
+    # has spent five minutes clearing a week it cannot execute.
+    plan = (deviations.plan_deviations(spec, players, batteries)
+            if spec.execute and spec.deviation else None)
 
     st = stack.Stack()
     try:
@@ -280,13 +317,20 @@ async def execute_run(spec: RunSpec, *, out_dir=None, sha: str = None) -> dict:
             areas=run_areas(players, batteries),
             preferences=spec.preferences, sigmoid=spec.sigmoid,
             gamma=spec.gamma, eta_relative=spec.eta_relative,
-            execute=spec.execute)
+            execute=spec.execute,
+            deviate=(functools.partial(deviations.apply, plan)
+                     if plan is not None else None))
     finally:
         await st.close()
 
     checks = preflight(records, minimum=spec.min_ratio_spread)
     csv_path = aggregates.write_slot_csv(out_dir / f"{spec.run_id}_slots.csv",
                                          records)
+    # Beside the slot CSV, not instead of it: what `preferences_first` changes
+    # against `pro_rata_first` is which areas get filled, at an unchanged
+    # round-level traded quantity, and that is only visible per area.
+    area_path = aggregates.write_area_csv(out_dir / f"{spec.run_id}_areas.csv",
+                                          records, preferences)
     # One manifest per run directory, not one shared file. A campaign runs one
     # process per run, and `write_manifest` is a read-modify-write: two workers
     # appending to a single manifest.json would lose entries silently, which is
@@ -295,18 +339,27 @@ async def execute_run(spec: RunSpec, *, out_dir=None, sha: str = None) -> dict:
         out_dir / "manifest.json", spec.run_id, config=spec.config(),
         seed=spec.seed, dataset_extension_seed=spec.dataset_extension_seed,
         player_ids=players, cell_seeds=spec.cell_seeds,
-        output_files=[csv_path], sha=sha,
+        output_files=[csv_path, area_path], sha=sha,
         cell=spec.cell,
         community_composition=profiles.community_composition(community.flags,
                                                              players),
         n_battery_areas=len(batteries),
+        # Beside `n_battery_areas`, and for the same reason: the two draws a
+        # run depends on that are not readable off its parameters alone.
+        n_named=len(preferences),
+        n_mutual_pairs=sum(1 for area, partner in preferences.items()
+                           if preferences.get(partner) == area) // 2,
+        # Who deviated, not just by how much: a penalty column is unreadable
+        # without the area ids it belongs to.
+        deviation=(plan.as_dict() if plan is not None else None),
         battery_rule=(batteries[0].rule if batteries else None),
         sigma_load=round(week.sigma_load, 6),
         sigma_pv=round(week.sigma_pv, 6),
         checks=checks,
         wall_sec=round(time.perf_counter() - started, 3))
     return {"run_id": spec.run_id, "records": records, "checks": checks,
-            "manifest": manifest, "csv": str(csv_path)}
+            "manifest": manifest, "csv": str(csv_path),
+            "areas_csv": str(area_path)}
 
 
 def run_one(spec: RunSpec, *, sha: str = None) -> dict:
@@ -319,4 +372,5 @@ def run_one(spec: RunSpec, *, sha: str = None) -> dict:
 
     result = asyncio.run(execute_run(spec, sha=sha))
     return {"run_id": result["run_id"], "checks": result["checks"],
-            "manifest": result["manifest"], "csv": result["csv"]}
+            "manifest": result["manifest"], "csv": result["csv"],
+            "areas_csv": result["areas_csv"]}

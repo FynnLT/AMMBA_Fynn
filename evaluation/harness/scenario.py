@@ -11,6 +11,11 @@ Both honour the harness assumption "one order per area and slot", and
 `_assert_one_order_per_area` checks it on every book rather than trusting it:
 the artifact enforces nothing here, and a profile source that breaks the
 assumption must fail loudly instead of being netted quietly.
+
+`draw_preferences` is the profile path's equivalent of the pairing block in
+`make_scenario`: it draws the partner relationships *once per run*, and
+`make_scenario_from_profiles` posts them in whichever slots both sides
+actually have an order (D-71/D-81).
 """
 import random
 
@@ -77,8 +82,144 @@ def _assert_one_order_per_area(scen: dict) -> dict:
     return scen
 
 
+def area_uuid_for(player) -> str:
+    """The market area id of a household.
+
+    One place, because `draw_preferences` and `make_scenario_from_profiles`
+    have to agree on it exactly: a preference dict keyed on a differently
+    formatted id would silently post no pairs at all, which is the D-71
+    failure this section exists to close.
+    """
+    return player if isinstance(player, str) else f"player-{int(player):03d}"
+
+
+def draw_preferences(players, *, named_share: float, mutual_share: float,
+                     seed: int) -> dict:
+    """Preferred-partner relationships for one run (D-71).
+
+    Drawn **once per run and held over the week** (D-81): a household does
+    not change its preferred neighbour every quarter hour, and holding the
+    pairs is what makes "the partner had nothing to post in this slot" a
+    countable result (`pairs_unpostable`) rather than a property of a
+    per-slot redraw.
+
+    `round(named_share * len(players))` households are drawn as namers; each
+    names exactly one partner, so the returned dict has exactly that many
+    entries. A fraction `mutual_share` of them are paired *with each other*
+    and name back; the rest draw their partner uniformly from the other
+    players. Accidental reciprocity among the non-mutual namers is redrawn,
+    so `mutual_share` is the realised mutual rate and not merely its
+    expectation.
+
+    A household names a partner regardless of which side it ends up on in a
+    given slot -- under netting (D-61) the same player is a buyer in one slot
+    and a seller in the next, and the pair is a relationship, not a slot
+    property.
+
+    **Battery areas never name and are never named.** They are a modelling
+    assumption (D-75), and a preference for a storage unit would put that
+    assumption on both sides of the RQ1 comparison; `players` carries
+    households only, so this holds by construction rather than by filtering.
+
+    Deterministic in `seed` through its own `random.Random` -- never the
+    module-level RNG, which a campaign worker shares with everything else it
+    imports.
+
+    Returns `{area_uuid: partner_area_uuid}`.
+    """
+    if not 0.0 <= named_share <= 1.0:
+        raise ScenarioError(
+            f"named_share must be in [0, 1], got {named_share}")
+    if not 0.0 <= mutual_share <= 1.0:
+        raise ScenarioError(
+            f"mutual_share must be in [0, 1], got {mutual_share}")
+
+    areas = [area_uuid_for(player) for player in players]
+    if len(set(areas)) != len(areas):
+        raise ScenarioError("players do not map to distinct area ids")
+    n_named = int(round(named_share * len(areas)))
+    if n_named < 1 or len(areas) < 2:
+        return {}
+
+    rng = random.Random(seed)
+    namers = rng.sample(areas, n_named)
+
+    # A reciprocal relationship takes two households, so the mutual block is
+    # rounded down to an even count: `mutual_share` names a share of the
+    # *pairs*, and half a pair cannot name back.
+    n_mutual = min(n_named, int(round(mutual_share * n_named)))
+    n_mutual -= n_mutual % 2
+
+    preferences = {}
+    for first, second in zip(namers[:n_mutual:2], namers[1:n_mutual:2]):
+        preferences[first] = second
+        preferences[second] = first
+
+    solo = namers[n_mutual:]
+    for area in solo:
+        candidates = [other for other in areas if other != area]
+        preferences[area] = rng.choice(candidates)
+
+    # Repair accidental reciprocity: two solo namers that happened to draw
+    # each other would raise the realised mutual rate above `mutual_share`,
+    # and the `mutual_share = 0` cell has to mean exactly zero mutual pairs.
+    solo_set = set(solo)
+    for area in solo:
+        partner = preferences[area]
+        if partner in solo_set and preferences.get(partner) == area:
+            candidates = [other for other in areas
+                          if other != area and other != partner]
+            if candidates:
+                preferences[area] = rng.choice(candidates)
+    return preferences
+
+
+def _apply_preferences(producers: list, consumers: list,
+                       preferences: dict | None) -> dict:
+    """Post the held pairs into one slot's book, and count what could not be.
+
+    A named partner is only postable where it holds an order **on the
+    opposite side in this same slot**: the clearing node drops a
+    `preferred_partner` that is not a counterparty in the market
+    (`preferences.parse_preferred_partner`), so posting one anyway would
+    trade a countable harness result for a warning in a log nobody reads
+    over 672 slots.
+    """
+    counts = {"pairs_posted": 0, "pairs_unpostable": 0, "pairs_mutual": 0}
+    if not preferences:
+        return counts
+
+    side_of = {}
+    for side, orders in (("producers", producers), ("consumers", consumers)):
+        for order in orders:
+            side_of[order["area_uuid"]] = side
+
+    posted = {}
+    for orders in (producers, consumers):
+        for order in orders:
+            area = order["area_uuid"]
+            partner = preferences.get(area)
+            if partner is None:
+                continue
+            if side_of.get(partner) not in (None, side_of[area]):
+                order["preferred_partner"] = partner
+                posted[area] = partner
+            else:
+                # The partner nets to zero in this slot, or is on the same
+                # side of it. No pair here, and that is a 5.2 result of its
+                # own rather than a silent gap.
+                counts["pairs_unpostable"] += 1
+
+    counts["pairs_posted"] = len(posted)
+    counts["pairs_mutual"] = sum(
+        1 for area, partner in posted.items()
+        if posted.get(partner) == area) // 2
+    return counts
+
+
 def make_scenario_from_profiles(week, index, batteries=(), *,
-                                epsilon: float = NET_EPSILON) -> dict:
+                                epsilon: float = NET_EPSILON,
+                                preferences: dict = None) -> dict:
     """One slot's order book from the real profiles, netted per player (D-61).
 
     Netting happens here, in the scenario builder, not in the runner: the
@@ -97,6 +238,14 @@ def make_scenario_from_profiles(week, index, batteries=(), *,
 
     `week` is anything exposing `players`, `load_kwh` and `pv_kwh` as
     player -> per-slot kWh (`profiles.ProfileWeek` or `profiles.DayProfile`).
+
+    `preferences` is the run's held `{area_uuid: partner_area_uuid}` draw
+    (`draw_preferences`). It is applied **after** the book is built: the
+    netting and battery logic above is the D-61/D-75 implementation and does
+    not change because a household expressed a preference. Where both sides
+    of a named pair hold an order on opposite sides of this slot the
+    `preferred_partner` requirement is posted; where they do not, the pair is
+    counted under `pairs_unpostable` and nothing is posted.
     """
     producers, consumers = [], []
     generation = consumption = 0.0
@@ -128,6 +277,8 @@ def make_scenario_from_profiles(week, index, batteries=(), *,
                           "energy": round(energy, 6),
                           "energy_type": battery.energy_type})
 
+    pairs = _apply_preferences(producers, consumers, preferences)
+
     supply = sum(p["energy"] for p in producers)
     demand = sum(c["energy"] for c in consumers)
     scen = {
@@ -145,6 +296,9 @@ def make_scenario_from_profiles(week, index, batteries=(), *,
         "battery_kwh": round(battery_kwh, 6),
         "posted_supply_kwh": round(supply, 6),
         "posted_demand_kwh": round(demand, 6),
+        # Always present, also at zero: a CSV column that appears only in the
+        # preference cells cannot be compared against the baseline's.
+        **pairs,
         "source": "profiles",
     }
     return _assert_one_order_per_area(scen)

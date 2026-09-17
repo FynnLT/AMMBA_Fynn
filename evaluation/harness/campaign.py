@@ -22,11 +22,11 @@ manifest stops describing the run it names.
 Paths are derived from this file's own location so the harness runs on
 Windows as well as on the Linux sandbox the pilot used.
 """
-import asyncio, csv, functools, itertools, json, logging, multiprocessing
-import platform, statistics, sys, time
+import asyncio, csv, dataclasses, functools, itertools, json, logging
+import multiprocessing, platform, statistics, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
-import runner, runs, scenario, stack
+import deviations, runner, runs, scenario, stack
 logging.disable(logging.WARNING)
 
 # Every run_slot call names its community and its slot. The slot is the
@@ -231,6 +231,11 @@ SEEDS = (0, 1, 2, 3, 4)
 # manifest as `dataset_extension_seed`.
 EXTENSION_SEED_BASE = 4242
 
+# The out-of-sample week T-19 validated against, and deliberately the same
+# draw as `EXTENSION_SEED_BASE`: seed 0 of every campaign cell runs the week
+# the fit was *not* fitted on.
+OOS_EXTENSION_SEED = 4242
+
 # D-76. The participation every cell runs at unless it is the axis being
 # varied. It is set explicitly in `spec_for` rather than left to the
 # `RunSpec` default, so each manifest records the value the run actually used
@@ -239,8 +244,45 @@ EXTENSION_SEED_BASE = 4242
 # manifests has to be able to see that from the entries alone.
 REFERENCE_PARTICIPATION = 0.25
 
+# D-71/D-81. The preference density axis of block 1's second pass: the share
+# of households that name a preferred partner. The first pass had no axis at
+# all -- `make_scenario_from_profiles` posted no preference, so every
+# preference cell cleared a book with zero pairs and `preferences_first` and
+# `pro_rata_first` were the same run.
+DENSITIES = (0.20, 0.50, 0.80)
+
+# The reference reciprocity rate, and the two sensitivity points around it.
+# Only a *mutual* nomination gets priority (the clearing node matches pairs,
+# not one-sided wishes), so this is the parameter that decides how much of
+# the named volume the mechanism can act on at all.
+REFERENCE_MUTUAL = 0.50
+MUTUAL_SENSITIVITY = (0.25, 0.75)
+
+# D-79. The green multiplier of the `multipliers_on` cells.
+#
+# The run plan says 0.03, from the crossover argument on the pilot mix. The
+# campaign mix is different: at participation 0.25 the battery (grey) share of
+# posted energy is 20.9 % (D-76), so grey/green ~ 0.264 and the crossover sits
+# at 0.10 * 0.264 ~ 0.026 on the week's *average* -- 0.03 is above it, where
+# the levy no longer funds the bonus and the two formulations start to
+# coincide (trap 1). Hence 0.02.
+#
+# NOTE, measured 17.09. and reported rather than acted on: on this week the
+# average is the only level at which the argument holds at all. The battery
+# rule discharges into 18:15..22:00 and PV runs 08:00..17:45, so **no slot
+# carries both green and grey supply** -- 0 of 91 grey slots, at participation
+# 0.25 and at 1.0 alike. Per slot `green_alloc_kwh` or `grey_alloc_kwh` is
+# always 0, `crossover_mult` is therefore None everywhere, and the green bonus
+# is unfundable at every value of G. What `multipliers_on` measures on this
+# week is the grey levy and the pool surplus it leaves behind, not the
+# bonus/levy trade-off. Changing it means changing the battery windows, which
+# is a D-75 decision and not a harness one.
+GREEN_MULTIPLIER = 0.02
+GREY_LEVY = 0.10
+LEVY_CAP = 0.20
+
 # The green-share axis as its own cell group (D-76). Deliberately not a factor
-# over the four cells above: crossing them would turn block 1 into twenty
+# over the mechanism cells above: crossing them would turn block 1 into fifty
 # cells and answer a question nobody asked, while what 5.1 needs is one axis
 # varied against a fixed preference set. `green_share_025` therefore repeats
 # the baseline cell's configuration under its own name -- the redundancy is
@@ -259,6 +301,36 @@ CALIBRATED_SIGMOID = {"k_upper": 40.0, "k_lower": 8.0, "theta": 1.0, "steepness"
 BASELINE_PREFERENCES = dict(PREF_OFF)
 
 
+# ---------------------------------------------------------------- block 2
+
+# D-80. The accidental noise floor, two sigma below the deadband, so roughly
+# 95 % of accidental deviations fall inside it. Chosen and stated as chosen in
+# 5.1, not sourced; deriving it from a PV forecast-error reference would be
+# better and is a literature search away.
+SIGMA = deviations.DEFAULT_SIGMA
+
+# D-26/D-44. The deadband relative to the trade's own quantity, not absolute:
+# an absolute eta makes the penalty a function of installation size.
+ETA_RELATIVE = 0.10
+
+# D-72's two axes: how hard a single deviator deviates, and how many deviate
+# at the reference share. `k = 1 / 5 / 10` is the minimum the decision names;
+# `k = 2` is the extra point and the first to cut if the budget is short.
+DEVIATION_SHARES = (0.10, 0.25, 0.50)
+REFERENCE_SHARE = 0.25
+COALITION_SIZES = (2, 5, 10)
+DEVIATION_SEED = 20260919
+
+
+def execution_gamma() -> float:
+    """The execution node's own configured gamma, read rather than restated.
+
+    A campaign that hard-codes it records a number the service may not be
+    using, and the manifest then describes a run that did not happen.
+    """
+    return stack.Stack().cfg_exe.penalty_gamma
+
+
 def spec_for(cell: str, seed: int, **overrides) -> runs.RunSpec:
     """One run of one cell. Everything it depends on is in the spec."""
     params = dict(
@@ -270,32 +342,163 @@ def spec_for(cell: str, seed: int, **overrides) -> runs.RunSpec:
     return runs.RunSpec(**params)
 
 
-def cells() -> list:
-    """The campaign grid: every cell at all five seeds.
+def block1_grid() -> dict:
+    """Block 1's second pass: 16 cells.
 
-    The first cell is the delta baseline itself, so it is produced by the same
-    code path as everything it is subtracted from.
+    The first pass had four mechanism cells and they produced byte-identical
+    slot CSVs, for two reasons that are both closed now: the profile path
+    posted no preference at all (D-71), and the slot CSV projected nothing the
+    mechanism changes (Code To-Do 3.11). The order axis is therefore crossed
+    with a *density* axis here -- "preferences first" is not a treatment
+    unless there are preferences to serve first.
     """
-    grid = {
-        "baseline_pro_rata": {"preferences": BASELINE_PREFERENCES},
-        "preferences_first": {"preferences": prefs(order="preferences_first")},
-        "pro_rata_first": {"preferences": prefs(order="pro_rata_first")},
-        "multipliers_on": {"preferences": prefs(multipliers_enabled=True)},
-    }
+    grid = {"baseline_pro_rata": {"preferences": BASELINE_PREFERENCES}}
+
+    # The two orders at three densities. Same densities on both, so a delta is
+    # read down a column and never across two differently populated books.
+    for order in ("preferences_first", "pro_rata_first"):
+        prefix = ("prefs_first" if order == "preferences_first"
+                  else "pro_rata_first")
+        for density in DENSITIES:
+            grid[f"{prefix}_d{int(density * 100):03d}"] = {
+                "preferences": prefs(order=order, multipliers_enabled=False),
+                "named_share": density, "mutual_share": REFERENCE_MUTUAL}
+
+    # D-71 sensitivity: the reciprocity rate at the reference density. Only a
+    # mutual nomination gets priority, so this is the parameter that decides
+    # how much of the named volume the mechanism can act on at all.
+    for mutual in MUTUAL_SENSITIVITY:
+        grid[f"prefs_first_d050_m{int(mutual * 100):03d}"] = {
+            "preferences": prefs(order="preferences_first",
+                                 multipliers_enabled=False),
+            "named_share": 0.50, "mutual_share": mutual}
+
+    # The two multiplier formulations, identical in everything but `mode`
+    # (D-46: they differ at every measured parameter point, and the comparison
+    # is only a comparison if nothing else moves between them).
+    for mode in ("multiplicative", "additive"):
+        name = ("multipliers_on" if mode == "multiplicative"
+                else "multipliers_on_additive")
+        grid[name] = {
+            "preferences": prefs(multipliers_enabled=True, mode=mode,
+                                 sides="seller",
+                                 green_multiplier=GREEN_MULTIPLIER,
+                                 grey_levy=GREY_LEVY, levy_cap=LEVY_CAP),
+            "named_share": 0.50, "mutual_share": REFERENCE_MUTUAL}
+
     # The green-share axis: five cells at the baseline preference set, varying
     # nothing but `participation`. Note that `green_share_000` fits on fewer
     # slots than the rest -- with no battery areas the community has no supply
     # at all in the evening periods the rule discharges into, so roughly 262
     # of 672 slots trade against roughly 353 elsewhere. Both round types still
     # occur and the ratio span is unchanged, so it passes pre-flight; but a
-    # table that puts its per-slot means next to the other four cells is
-    # comparing different numbers of slots and has to say so.
+    # table that puts its per-slot means next to the other cells is comparing
+    # different numbers of slots and has to say so.
     grid.update({
         f"green_share_{int(share * 100):03d}": {
             "preferences": BASELINE_PREFERENCES, "participation": share}
         for share in GREEN_SHARES})
-    return [spec_for(cell, seed, **overrides)
-            for cell, overrides in grid.items() for seed in SEEDS]
+    return grid
+
+
+def block2_grid() -> dict:
+    """Block 2: 13 cells, every one of them executing (D-72).
+
+    `RunSpec.execute` defaulted to False and no cell set it, so no campaign
+    run has ever executed. These do. `gamma` is read off the execution node's
+    own configuration rather than restated here, so the manifest records the
+    number the service actually used.
+
+    `b2_noise_only` is the reference the two strategic arms are read against:
+    the accidental layer on its own, no named deviator, at the same sigma.
+    Preferences are off throughout -- block 2 measures the penalty layer, and
+    crossing it with the preference axis would answer a question nobody asked.
+    """
+    gamma = execution_gamma()
+
+    def cell(arm, share, k):
+        return {"preferences": BASELINE_PREFERENCES, "execute": True,
+                "gamma": gamma, "eta_relative": ETA_RELATIVE,
+                "deviation": {"arm": arm, "share": share, "k": k,
+                              "sigma": SIGMA, "seed": DEVIATION_SEED}}
+
+    grid = {"b2_noise_only": cell(deviations.NONE, 0.0, 0)}
+    for arm, prefix in ((deviations.SELLER_ARM, "b2_sell"),
+                        (deviations.BUYER_ARM, "b2_buy")):
+        # How hard one deviator deviates.
+        for share in DEVIATION_SHARES:
+            grid[f"{prefix}_s{int(share * 100):02d}"] = cell(arm, share, 1)
+        # How many deviate, at the reference share.
+        for k in COALITION_SIZES:
+            grid[f"{prefix}_k{k:02d}"] = cell(arm, REFERENCE_SHARE, k)
+    return grid
+
+
+def _fit_module():
+    """`calibration/fit.py`, resolved relative to this file.
+
+    `conftest.py` puts `calibration/` on the path for the test suite, but
+    `campaign.py` is also run as a script from inside `harness/`, where it is
+    not importable. Resolved from `HARNESS_DIR` rather than from the working
+    directory, for the same reason `stack.REPO` is: the harness has to run on
+    Windows from wherever it was started.
+    """
+    directory = str(HARNESS_DIR.parent / "calibration")
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    import fit
+    return fit
+
+
+def calibration_cells() -> list:
+    """The six weeks T-19 fitted on, from one command (Code To-Do 4.6).
+
+    They were produced ad hoc through `runs.run_one`; their manifests are
+    complete, but nothing reproduced them. The five stability seeds are
+    imported from the fit itself rather than restated here -- two lists that
+    have to agree is one list too many -- and 4242 is the out-of-sample week.
+
+    One seed per run, not five: a calibration week *is* its extension seed, so
+    `seed = 0` and `cell_seeds = (0,)`. `sigmoid = None` as well, because
+    these runs are what the calibrated band is fitted *from* and must not be
+    started at it; the clearing node falls back to its own configuration.
+    Every field here matches `out/calib-20260917/manifest.json`, which is the
+    specification for this function.
+    """
+    fit = _fit_module()
+
+    def spec(run_id, extension_seed):
+        return runs.RunSpec(
+            run_id=run_id, seed=0, cell_seeds=(0,), cell="calibration",
+            dataset_extension_seed=extension_seed,
+            participation=REFERENCE_PARTICIPATION,
+            preferences=dict(PREF_OFF), sigmoid=None, execute=False,
+            baseline=runs.BASELINE)
+
+    return ([spec(f"calib-{seed}", seed)
+             for seed in fit.DEFAULT_STABILITY_SEEDS]
+            + [spec("oos-4242", OOS_EXTENSION_SEED)])
+
+
+def cells(block=None) -> list:
+    """The campaign grid: every cell at all five seeds.
+
+    `block` selects a group -- 1, 2, "calibration", or None for the union.
+    The first cell of block 1 is the delta baseline itself, so it is produced
+    by the same code path as everything it is subtracted from.
+    """
+    if block == "calibration":
+        return calibration_cells()
+    grid = {}
+    if block in (None, 1):
+        grid.update(block1_grid())
+    if block in (None, 2):
+        grid.update(block2_grid())
+    specs = [spec_for(cell, seed, **overrides)
+             for cell, overrides in grid.items() for seed in SEEDS]
+    if block is None:
+        specs += calibration_cells()
+    return specs
 
 
 def _worker(payload):
@@ -325,29 +528,96 @@ def run_sequential(specs, *, sha=None) -> list:
     return [runs.run_one(spec, sha=sha) for spec in specs]
 
 
+def _csv_column_sum(path, column) -> float:
+    """Sum of one numeric column of a run's slot CSV, blanks skipped."""
+    total = 0.0
+    with open(path, newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            value = row.get(column)
+            if value not in (None, ""):
+                total += float(value)
+    return total
+
+
 def report(results) -> None:
     """Every run's guards, printed. `check_ratio_spread` runs inside
     `runs.execute_run`, so a cell that never varied never gets this far --
-    a guard that is never called is not a guard."""
+    a guard that is never called is not a guard.
+
+    Beyond the guards, two result columns: `pairs_posted` for block 1 and the
+    summed `penalty_pool_ct` for block 2. Both exist so an empty result is
+    visible in the console rather than only six weeks later in a CSV -- the
+    first pass printed clean guards for four cells that had produced the same
+    file, and nothing on this line said so.
+    """
     for result in results:
         checks = result["checks"]
+        posted = _csv_column_sum(result["csv"], "pairs_posted")
+        pool = _csv_column_sum(result["csv"], "penalty_pool_ct")
         print(f"  {result['run_id']:<32} "
               f"slots={checks['n_slots']:<4} "
               f"ratio_span={checks['ratio_span']:<10} "
+              f"pairs_posted={posted:<10.0f} "
+              f"penalty_pool_ct={pool:<12.3f} "
               f"{checks['round_type_census']}")
 
 
-async def main():
+def parse_block(argv) -> object:
+    """`--block 1`, `--block 2`, `--calibration`, default all."""
+    if "--calibration" in argv:
+        return "calibration"
+    if "--block" in argv:
+        value = argv[argv.index("--block") + 1]
+        if value == "calibration":
+            return "calibration"
+        if value not in ("1", "2"):
+            raise SystemExit(f"--block takes 1, 2 or calibration, not {value!r}")
+        return int(value)
+    return None
+
+
+def parse_out(argv) -> str:
+    """`--out <dir>`: write this campaign somewhere other than `out/`.
+
+    `write_manifest` appends, so re-running a cell into the directory that
+    already holds it adds a second entry to that run's manifest rather than
+    replacing it. That is the right behaviour for a re-run of a *campaign*
+    and the wrong one for reproducing a week that has already been fitted on
+    -- `--calibration` into the live `out/` would append to the manifests of
+    the five weeks T-19 used. Hence the redirect, rather than a note in a
+    README telling the next person to remember.
+    """
+    if "--out" not in argv:
+        return None
+    return argv[argv.index("--out") + 1]
+
+
+def redirect(specs, out_dir):
+    """Every spec's `out_dir` set to `<out_dir>/<run-id>`.
+
+    Set on the spec rather than passed beside it, so the manifest records the
+    directory the run actually wrote into.
+    """
+    if out_dir is None:
+        return specs
+    root = Path(out_dir)
+    return [dataclasses.replace(spec, out_dir=str(root / spec.run_id))
+            for spec in specs]
+
+
+async def main(block=None, out_dir=None):
     """The profile campaign: every cell at five seeds, one process per run."""
     started = time.perf_counter()
-    specs = cells()
-    print(f"campaign: {len(specs)} runs "
-          f"({len(specs) // len(SEEDS)} cells x {len(SEEDS)} seeds), "
+    specs = redirect(cells(block), out_dir)
+    n_cells = len({spec.cell for spec in specs})
+    name = {1: "block 1", 2: "block 2",
+            "calibration": "calibration"}.get(block, "all blocks")
+    print(f"campaign ({name}): {len(specs)} runs over {n_cells} cells, "
           f"one process each")
     results = run_parallel(specs)
     report(results)
     print(f"\n{len(results)} runs in {time.perf_counter() - started:.1f}s")
-    print(f"manifests under {OUT}")
+    print(f"manifests under {Path(out_dir) if out_dir else OUT}")
 
 
 async def pilot_main():
@@ -388,4 +658,4 @@ if __name__ == "__main__":
         # stay runnable; they are not the profile campaign.
         asyncio.run(pilot_main())
     else:
-        asyncio.run(main())
+        asyncio.run(main(parse_block(sys.argv), parse_out(sys.argv)))

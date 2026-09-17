@@ -115,8 +115,12 @@ async def run_slot(st, scen, *, community, slot, market_id=None,
     await st.post("/orders-normalized", orders)
 
     trigger = {"market_id": mid, "community_uuid": community,
-               "time_slot": slot, "community_name": community_name,
-               "sigmoid_params": dict(sigmoid or SIGMOID)}
+               "time_slot": slot, "community_name": community_name}
+    # `sigmoid=False` omits the override entirely, so the Clearing Node falls
+    # back to its own `configuration.yaml`. Without it every run the harness
+    # starts overrides the configured band, and nothing ever exercises it.
+    if sigmoid is not False:
+        trigger["sigmoid_params"] = dict(sigmoid or SIGMOID)
     if preferences is not None:
         trigger["preference_params"] = dict(preferences)
     clearing = await st.clear(trigger)

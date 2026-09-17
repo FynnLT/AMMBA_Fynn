@@ -9,6 +9,18 @@ from src.contract import ContractError, MockContractClient, Web3ContractClient
 from src.sigmoid import to_node_int
 
 MARKET = "0x" + "bb" * 32
+
+# A fixed test input, not a configuration value -- the same reasoning as
+# `GOLDEN_SIGMOID` in test_clearing.py. The x10,000 integers and the
+# divergence messages in these tests are written out in full, so the band
+# they were written for belongs in the test rather than being read from the
+# config default. Taking `CommunityParams()` here instead would tie them to
+# whatever the community is configured to, and they would break on every
+# parameter change -- K_upper on 17.09.2026 (D-77), theta and B when the
+# calibration lands (T-19).
+GOLDEN_COMMUNITY = CommunityParams(k_upper=28.5, k_lower=8.0,
+                                   theta=1.0, steepness=2.5)
+
 # Constructing the live client needs a well-formed address and key, not a
 # reachable node: web3's HTTP provider connects lazily, so nothing here
 # touches a chain.
@@ -99,7 +111,7 @@ def live_client(on_chain_result) -> Web3ContractClient:
 
 @requires_web3
 def test_verify_community_params_accepts_matching_values():
-    local = CommunityParams()
+    local = GOLDEN_COMMUNITY
     # The contract stores the parameters scaled by 10,000.
     on_chain = [to_node_int(local.k_upper), to_node_int(local.k_lower),
                 to_node_int(local.theta), to_node_int(local.steepness)]
@@ -115,7 +127,7 @@ def test_verify_community_params_accepts_matching_values():
 @requires_web3
 def test_verify_community_params_names_only_the_diverging_field():
     """#18: the message used to print `!=` for fields that agreed."""
-    local = CommunityParams()
+    local = GOLDEN_COMMUNITY
     on_chain = [to_node_int(local.k_upper), to_node_int(local.k_lower),
                 to_node_int(1.2), to_node_int(local.steepness)]
 
@@ -130,7 +142,7 @@ def test_verify_community_params_names_only_the_diverging_field():
 
 @requires_web3
 def test_verify_community_params_reports_every_diverging_field():
-    local = CommunityParams()
+    local = GOLDEN_COMMUNITY
     on_chain = [to_node_int(30.0), to_node_int(local.k_lower),
                 to_node_int(local.theta), to_node_int(3.0)]
 

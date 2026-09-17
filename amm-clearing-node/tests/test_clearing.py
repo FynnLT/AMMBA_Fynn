@@ -58,9 +58,22 @@ def order(idx, order_type, name, energy, *, status="Open", time_slot=SLOT):
             "energy_rate": rate, "requirements": None}
 
 
+# A fixed test input, not a configuration value. These tests check the
+# clearing arithmetic against a worked example, so the band that example was
+# computed on is part of the test rather than something the tests read from
+# the config. That keeps them valid across every change to the community
+# parameters -- K_upper on 17.09.2026 (D-77), theta and B when the
+# calibration lands (T-19). That the *configured* band is loaded and applied
+# is a separate question, and the second slot of
+# `evaluation/harness/smoke.py` is what answers it.
+GOLDEN_SIGMOID = {"k_upper": 28.5, "k_lower": 8.0,
+                  "theta": 1.0, "steepness": 2.5}
+
+
 def trigger(**overrides):
     payload = {"market_id": MARKET, "community_uuid": COMMUNITY,
-               "time_slot": SLOT}
+               "time_slot": SLOT,
+               "sigmoid_params": dict(GOLDEN_SIGMOID)}
     payload.update(overrides)
     return payload
 
@@ -540,3 +553,21 @@ async def test_an_unrecoverable_anchor_hash_is_flagged_not_hidden(cfg):
     assert result["tx_hash"] is None
     assert result["anchor_tx_hash_recovered"] is False
     assert len(db.trades) == 6
+
+
+def test_configuration_yaml_ships_a_usable_sigmoid_band():
+    """The configured band is loaded and is a band, whatever its values are.
+
+    Deliberately not an assertion on 40.0 / 8.0: pinning the numbers here
+    would put this test back in the way of every parameter change, which is
+    the thing `GOLDEN_SIGMOID` exists to avoid. What must hold is that
+    `configuration.yaml` reaches `resolve_community` at all and describes a
+    band a price can sit in -- the silent failure this guards against is a
+    parameter update that edits the file but never takes effect.
+    """
+    from src.config import load_config, resolve_community
+
+    community = resolve_community(load_config(), "any-unknown-community")
+    assert community.k_lower < community.k_upper
+    assert community.k_lower > 0
+    assert community.steepness > 0

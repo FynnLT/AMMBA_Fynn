@@ -252,12 +252,9 @@ GREEN_SHARES = (0.0, 0.25, 0.50, 0.75, 1.0)
 # re-derived per table: pro-rata with preferences disabled, at the calibrated
 # theta/steepness.
 #
-# None until T-19 fits it. Note what that means: `run_slot` then falls back to
-# `runner.SIGMOID` and sends *that* as the trigger's `sigmoid_params`, which
-# `resolve_community` merges over the configured community parameters. So the
-# runs below are at the harness default (theta 1.0, steepness 2.5), not at the
-# community configuration -- and every manifest entry records which, because
-# the clearing response carries `sigmoid_params` back.
+# Fitted 17.09.2026 (T-19, D-78): componentwise median over five independent
+# weeks at alpha = 0.5, rounded. Sent as the trigger's `sigmoid_params` and
+# recorded in every manifest; the same values sit in configuration.yaml.
 CALIBRATED_SIGMOID = {"k_upper": 40.0, "k_lower": 8.0, "theta": 1.0, "steepness": 0.6}
 BASELINE_PREFERENCES = dict(PREF_OFF)
 

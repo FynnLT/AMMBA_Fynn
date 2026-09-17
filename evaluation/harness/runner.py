@@ -13,7 +13,7 @@ import hashlib
 import struct
 
 SLOT_SEC = 900
-SIGMOID = {"k_upper": 28.5, "k_lower": 8.0, "theta": 1.0, "steepness": 2.5}
+SIGMOID = {"k_upper": 40.0, "k_lower": 8.0, "theta": 1.0, "steepness": 2.5}
 
 
 def market_id_for(community: str, slot: int) -> str:
@@ -108,7 +108,7 @@ async def run_slot(st, scen, *, community, slot, market_id=None,
     for c in scen["consumers"]:
         o = {"order_type": "Bid", "created_by": c["name"],
              "area_uuid": c["area_uuid"], "market_id": mid, "time_slot": slot,
-             "energy": c["energy"], "energy_rate": 28.5}
+             "energy": c["energy"], "energy_rate": 40.0}
         if c.get("preferred_partner"):
             o["requirements"] = {"preferred_partner": c["preferred_partner"]}
         orders.append(o)

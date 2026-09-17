@@ -60,7 +60,7 @@ preferences:
 # `default_community` (the demo UI creates communities on the fly).
 communities:
   communityid_1:
-    k_upper_ct_per_kwh: 28.5      # Retail buy price
+    k_upper_ct_per_kwh: 40.0      # Retail buy price
     k_lower_ct_per_kwh: 8.0       # Feed-in tariff
     theta: 1.0                    # Sigmoid midpoint (optimized offline)
     steepness: 2.5                # Sigmoid steepness (optimized offline)
@@ -69,7 +69,7 @@ communities:
     pool_id: "AMM_POOL_communityid_1"
 
 default_community:
-  k_upper_ct_per_kwh: 28.5
+  k_upper_ct_per_kwh: 40.0
   k_lower_ct_per_kwh: 8.0
   theta: 1.0
   steepness: 2.5

@@ -21,7 +21,7 @@ const TIME_SLOT_SEC = 900;
 
 let idSeq = 0;
 const state = {
-  config: { name: "Community 1", kUpper: 28.5, kLower: 8.0, theta: 1.0, steepness: 2.5 },
+  config: { name: "Community 1", kUpper: 40.0, kLower: 8.0, theta: 1.0, steepness: 2.5 },
   // Numeric multiplier parameters sent with the trigger. The rules themselves
   // (allocation order, multiplier mode/sides) stay in the backend
   // configuration and are only *displayed* here — nothing about the

@@ -22,7 +22,7 @@ price = [statistics.mean(f(r, "price") for r in rows if float(r["sd_ratio"]) == 
 psd   = [statistics.pstdev([f(r, "price") for r in rows if float(r["sd_ratio"]) == x]) for x in ratios]
 ax[0].axvspan(0.55, 1.0, color=RED, alpha=.06); ax[0].axvspan(1.0, 1.65, color=BLUE, alpha=.06)
 ax[0].errorbar(ratios, price, yerr=psd, color=BLUE, marker="o", ms=3, lw=1.4, capsize=2)
-ax[0].axhline(28.5, color=GREY, ls=":", lw=1); ax[0].axhline(8.0, color=GREY, ls=":", lw=1)
+ax[0].axhline(40.0, color=GREY, ls=":", lw=1); ax[0].axhline(8.0, color=GREY, ls=":", lw=1)
 ax[0].axvline(1.0, color="k", lw=.8, ls="--")
 ax[0].text(0.72, 26.5, "supply-limited", color=RED, fontsize=8)
 ax[0].text(1.15, 26.5, "demand-limited", color=BLUE, fontsize=8)
@@ -105,7 +105,7 @@ rows = load("D1_withholding.csv")
 fig, ax = plt.subplots(1, 2, figsize=(9, 3.4))
 for v, col, lab in ((0.0, GREY, "v = 0 (energy wasted)"),
                     (8.0, BLUE, "v = 8.0 ct (feed-in tariff)"),
-                    (28.5, GREEN, "v = 28.5 ct (retail, self-consumption)")):
+                    (40.0, GREEN, "v = 40.0 ct (retail, self-consumption)")):
     sub = sorted([r for r in rows if abs(f(r, "v_ct_per_kwh") - v) < 1e-9],
                  key=lambda r: f(r, "withheld_share"))
     ax[0].plot([f(r, "withheld_share") for r in sub], [f(r, "gain_ct") for r in sub],
@@ -114,7 +114,7 @@ ax[0].axhline(0, color="k", lw=.8)
 ax[0].set_xlabel("withheld share of own capacity"); ax[0].set_ylabel("gain without penalty [ct]")
 ax[0].set_title("Withholding only pays if the energy\nhas outside value", fontsize=9)
 ax[0].legend(frameon=False, fontsize=7)
-sub = sorted([r for r in rows if abs(f(r, "v_ct_per_kwh") - 28.5) < 1e-9],
+sub = sorted([r for r in rows if abs(f(r, "v_ct_per_kwh") - 40.0) < 1e-9],
              key=lambda r: f(r, "withheld_share"))
 x = [f(r, "withheld_share") for r in sub]
 ax[1].plot(x, [f(r, "gain_ct") for r in sub], color=GREEN, lw=1.6, label="gain (v = retail)")

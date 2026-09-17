@@ -66,7 +66,7 @@ class PreferenceConfigError(ValueError):
 
 @dataclass(frozen=True)
 class CommunityParams:
-    k_upper: float = 28.5   # retail buy price, ct/kWh
+    k_upper: float = 40.0   # retail buy price, ct/kWh
     k_lower: float = 8.0    # feed-in tariff, ct/kWh
     theta: float = 1.0      # sigmoid midpoint (optimized offline)
     steepness: float = 2.5  # sigmoid steepness B (optimized offline)
@@ -179,7 +179,7 @@ def _preferences_from_yaml(raw: dict) -> PreferenceConfig:
 
 def _community_from_yaml(raw: dict) -> CommunityParams:
     return CommunityParams(
-        k_upper=float(raw.get("k_upper_ct_per_kwh", 28.5)),
+        k_upper=float(raw.get("k_upper_ct_per_kwh", 40.0)),
         k_lower=float(raw.get("k_lower_ct_per_kwh", 8.0)),
         theta=float(raw.get("theta", 1.0)),
         steepness=float(raw.get("steepness", 2.5)),

@@ -19,14 +19,15 @@ def test_five_seeds_per_cell_recorded_individually():
     # computed from `cells()` itself cannot notice the grid losing a cell.
     #
     # Block 1: the baseline, two orders x three densities, two reciprocity
-    # sensitivities, two multiplier formulations and the five-point
-    # green-share axis -- 1 + 6 + 2 + 2 + 5 = 16 cells, 80 runs.
-    assert len(block1) == 80
-    # Block 2: the noise reference, two arms x (three shares + three
-    # coalition sizes) -- 1 + 12 = 13 cells, 65 runs.
-    assert len(block2) == 65
+    # sensitivities, two multiplier formulations, the three-cell D-83 overlap
+    # group and the five-point green-share axis --
+    # 1 + 6 + 2 + 2 + 3 + 5 = 19 cells, 95 runs.
+    assert len(block1) == 95
+    # Block 2: two noise references (D-84), two arms x (three shares + three
+    # coalition sizes) -- 2 + 12 = 14 cells, 70 runs.
+    assert len(block2) == 70
 
-    for specs, n_cells, n_runs in ((block1, 16, 80), (block2, 13, 65)):
+    for specs, n_cells, n_runs in ((block1, 19, 95), (block2, 14, 70)):
         by_cell = {}
         for spec in specs:
             by_cell.setdefault(spec.cell, []).append(spec.seed)
@@ -42,7 +43,7 @@ def test_five_seeds_per_cell_recorded_individually():
 
     # The groups are disjoint and `cells()` is their union plus calibration.
     assert not {s.cell for s in block1} & {s.cell for s in block2}
-    assert len(campaign.cells()) == 80 + 65 + 6
+    assert len(campaign.cells()) == 95 + 70 + 6
 
 
 def test_block_two_executes_and_block_one_does_not():
@@ -52,7 +53,10 @@ def test_block_two_executes_and_block_one_does_not():
         assert spec.execute is True, spec.cell
         assert isinstance(spec.deviation, dict), spec.cell
         assert spec.deviation["arm"] in campaign.deviations.ARMS
-        assert spec.deviation["sigma"] == campaign.SIGMA
+        # `b2_noise_off` is the one cell that runs without noise (D-84); every
+        # other cell, strategic or not, carries the campaign sigma.
+        assert spec.deviation["sigma"] == (
+            0.0 if spec.cell == "b2_noise_off" else campaign.SIGMA), spec.cell
         assert spec.deviation["seed"] == campaign.DEVIATION_SEED
         assert spec.eta_relative == campaign.ETA_RELATIVE
         # Read off the execution node's own configuration, never restated.
@@ -93,6 +97,34 @@ def test_the_deviation_axes_each_vary_one_thing():
     assert noise.deviation["arm"] == "none"
     assert noise.deviation["k"] == 0
     assert noise.deviation["sigma"] == campaign.SIGMA
+
+
+def test_the_two_noise_references_differ_only_in_sigma():
+    """D-84. The buyer externality carries no eta deadband -- that is the
+    mechanism's own specification -- so `b2_noise_only` has a buyer-side
+    penalty floor that the named deviator's signal is read against.
+    `b2_noise_off` is what separates the two, and it is only a separation if
+    nothing else moves between them."""
+    by_cell = {spec.cell: spec for spec in campaign.cells(2) if spec.seed == 0}
+    on, off = by_cell["b2_noise_only"], by_cell["b2_noise_off"]
+
+    assert on.deviation["sigma"] == campaign.SIGMA > 0
+    assert off.deviation["sigma"] == 0.0
+    assert {k: v for k, v in on.deviation.items() if k != "sigma"} == \
+        {k: v for k, v in off.deviation.items() if k != "sigma"}
+    assert off.deviation["arm"] == "none" and off.deviation["k"] == 0
+
+    # The noise stays on in every other arm: the floor is a finding about the
+    # mechanism, not something to configure away.
+    strategic = [s for s in campaign.cells(2)
+                 if s.deviation["arm"] != "none"]
+    assert strategic and all(s.deviation["sigma"] == campaign.SIGMA
+                             for s in strategic)
+
+    def without(spec, *keys):
+        return {k: v for k, v in spec.config().items() if k not in keys}
+
+    assert without(on, "deviation", "cell") == without(off, "deviation", "cell")
 
 
 def test_the_density_cells_differ_in_nothing_but_the_two_shares():

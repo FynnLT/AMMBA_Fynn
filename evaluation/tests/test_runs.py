@@ -183,3 +183,70 @@ async def test_a_measurement_that_is_written_can_be_read_back(st):
     """25.08.: the route had been renamed, the harness took the 404, and two
     blocks returned nulls that read like findings."""
     await runs.assert_measurement_round_trip(st, "preflight-c", BASE_SLOT)
+
+
+# ------------------------------------------- the effective sigmoid (§9)
+
+def test_sigmoid_effective_is_read_off_the_response_not_the_constant():
+    """Finding C. `sigmoid: null` in `config` means "whatever `runner.SIGMOID`
+    held that day", and it has already meant two different bands: the
+    calibration weeks cleared at steepness 2.5 under 77726be, the same config
+    re-run at HEAD clears at 0.6. Same ratios, different prices.
+
+    The manifest therefore records what the *node* applied. Read off the
+    response's own echo rather than resolved from `runner.SIGMOID` here --
+    answering from the harness's constant would reproduce exactly the gap
+    this closes.
+    """
+    applied = {"k_upper": 40.0, "k_lower": 8.0, "theta": 0.9986,
+               "steepness": 0.5991}
+    record = _record(BASE_SLOT, supply=12.5, demand=10.0)
+    record["clearing"]["sigmoid_params"] = applied
+    assert runs.sigmoid_effective([record]) == applied
+    # A copy, not the response's own dict.
+    assert runs.sigmoid_effective([record]) is not applied
+
+    # The first *cleared* slot answers; a no-trade slot carries no block.
+    no_trade = _record(BASE_SLOT - 900, supply=0.0, demand=10.0,
+                       status="no_trade")
+    assert runs.sigmoid_effective([no_trade, record]) == applied
+
+    # Nothing cleared: None, and `preflight` says so rather than leaving a
+    # null to be read as "the node reported no parameters".
+    assert runs.sigmoid_effective([no_trade]) is None
+
+
+def test_preflight_reports_whether_the_effective_sigmoid_was_readable():
+    records = [_record(BASE_SLOT, supply=12.5, demand=10.0),
+               _record(BASE_SLOT + 900, supply=4.0, demand=10.0)]
+    for record in records:
+        record["clearing"]["sigmoid_params"] = dict(runner.SIGMOID)
+    checks = runs.preflight(records, minimum=0.0)
+    assert checks["sigmoid_effective_read"] is True
+
+    for record in records:
+        record["clearing"].pop("sigmoid_params")
+    assert runs.preflight(records, minimum=0.0)["sigmoid_effective_read"] \
+        is False
+
+
+@pytest.mark.anyio
+async def test_a_run_records_the_band_the_node_actually_applied(tmp_path):
+    """End to end, on a short week: the default `sigmoid=None` records the
+    harness's current constant, an explicit dict records that dict -- and in
+    both cases the value came back out of the clearing response."""
+    fitted = {"k_upper": 40.0, "k_lower": 8.0, "theta": 1.2, "steepness": 0.4}
+
+    for name, sigmoid, expected in (("default", None, dict(runner.SIGMOID)),
+                                    ("explicit", fitted, fitted)):
+        spec = runs.RunSpec(run_id=f"sig-{name}", seed=0, days=1,
+                            n_players=30, sigmoid=sigmoid,
+                            out_dir=str(tmp_path / name))
+        result = await runs.execute_run(spec, sha="0" * 40)
+        manifest = result["manifest"]
+        assert set(manifest["sigmoid_effective"]) == {
+            "k_upper", "k_lower", "theta", "steepness"}
+        assert manifest["sigmoid_effective"] == expected, name
+        assert manifest["checks"]["sigmoid_effective_read"] is True
+        # The declared window travels with it (D-83).
+        assert manifest["battery_window"] == [73, 88]

@@ -88,6 +88,17 @@ class RunSpec:
     # slots -- the axis changes what supply is made of without changing how
     # much of the week can trade at all.
     participation: float = 0.25
+    # D-83. The battery discharge window, as periods labelled by their end.
+    # The default is the D-75 reference window and every existing cell keeps
+    # it: moving it would move the ratio distribution and invalidate the T-19
+    # fit a day after the freeze. The `mult_overlap` group declares its own
+    # (15:00-19:00, periods 61..76) because on the reference window PV and
+    # the battery never overlap in a slot, so the green bonus is unfundable
+    # at every `green_multiplier` and the two multiplier formulations cannot
+    # be told apart. Recorded in the manifest as `battery_window`, beside
+    # `battery_rule`, because it is part of the declared assumption and not
+    # of the data.
+    evening_periods: tuple = profiles.EVENING_PERIODS
     # D-71/D-81. The preference density axis of block 1. The relationships are
     # drawn once per run from `preference_seed` and held over the week, so a
     # run is reproducible from the spec alone -- `named_share = 0` reproduces
@@ -187,12 +198,38 @@ async def assert_measurement_round_trip(st, community: str, slot: int) -> None:
             f"posted {probe}")
 
 
+def sigmoid_effective(records) -> dict:
+    """The sigmoid parameters the Clearing Node actually applied.
+
+    Read off the first cleared response's `sigmoid_params`, which the node
+    echoes back (`runner.py` sends `trigger["sigmoid_params"]`, and
+    `resolve_community` merges it onto the configured community before
+    reporting it). Deliberately *not* resolved from `runner.SIGMOID`: the
+    point of the field is to record what the artifact used, and a harness
+    that answers from its own constant would reproduce exactly the gap this
+    closes.
+
+    None when no slot cleared -- there is then no response to read it from,
+    and `preflight` says so in `checks`.
+    """
+    for record in records:
+        clearing = record.get("clearing") or {}
+        if clearing.get("status") == "cleared" and clearing.get("sigmoid_params"):
+            return dict(clearing["sigmoid_params"])
+    return None
+
+
 def preflight(records, *, minimum: float = 0.25) -> dict:
     """The checks a run's output must pass before it counts as a result."""
     span = check_ratio_spread(records, minimum=minimum)
     census = check_round_type_census(records)
+    effective = sigmoid_effective(records)
     return {"ratio_span": round(span, 6), "round_type_census": census,
-            "n_slots": len(records)}
+            "n_slots": len(records),
+            # Stated rather than left to be inferred from a null
+            # `sigmoid_effective`: "no slot cleared" and "the node reported no
+            # parameters" are different failures.
+            "sigmoid_effective_read": effective is not None}
 
 
 # ---------------------------------------------------------- the manifest
@@ -268,7 +305,8 @@ def build_week(spec: RunSpec):
                                    days=spec.days)
     batteries = profiles.make_battery_areas(
         community.bess, players, participation=spec.participation,
-        seed=spec.battery_seed)
+        seed=spec.battery_seed,
+        evening_periods=tuple(spec.evening_periods))
     # Households only: a battery area never names and is never named (D-75).
     preferences = (scenario.draw_preferences(
         players, named_share=spec.named_share,
@@ -353,6 +391,19 @@ async def execute_run(spec: RunSpec, *, out_dir=None, sha: str = None) -> dict:
         # without the area ids it belongs to.
         deviation=(plan.as_dict() if plan is not None else None),
         battery_rule=(batteries[0].rule if batteries else None),
+        # The rule's parameter, not just its name (D-83): two runs with the
+        # same `battery_rule` and different windows are different assumptions,
+        # and a manifest that records only the name cannot tell them apart.
+        battery_window=[min(spec.evening_periods),
+                        max(spec.evening_periods)],
+        # Finding C: `sigmoid: null` in `config` means "whatever
+        # `runner.SIGMOID` held that day", and it has already meant two
+        # different bands -- the calibration weeks cleared at steepness 2.5
+        # under 77726be, the same config re-run at HEAD clears at 0.6. Read
+        # off the node's own echo rather than resolved from `runner.SIGMOID`
+        # here: the manifest records what the node applied, not what the
+        # harness meant to send.
+        sigmoid_effective=sigmoid_effective(records),
         sigma_load=round(week.sigma_load, 6),
         sigma_pv=round(week.sigma_pv, 6),
         checks=checks,

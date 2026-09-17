@@ -5,6 +5,8 @@ False and no cell set it, `run_sequence` forwarded `**kw` unchanged so a
 `measurements=` dict would have been the same dict in all 672 slots, and
 nothing generated a deviation. Every test here fails on that state.
 """
+import random
+
 import pytest
 
 import deviations
@@ -239,3 +241,34 @@ async def test_the_deviation_reaches_the_penalty_on_a_real_slot(st):
     charged = [r["area_uuid"] for r in withheld["execution"]["results"]
                if r["externality_penalty_ct"] > 0]
     assert charged == [seller]
+
+
+# ---------------------------------------------------- the noise-free cell
+
+def test_sigma_zero_posts_the_allocation_for_every_area():
+    """D-84. `b2_noise_off` has to be clean because the harness wrote the
+    allocation, not because it wrote nothing.
+
+    The execution node falls back to "no measurement -> delivered == traded"
+    for an area it finds no meter reading for (`execution.py`), so a
+    reference cell that skipped the write would be measuring that fallback
+    instead of the mechanism. Every allocated area gets a row, at every
+    sigma.
+    """
+    clearing = _clearing(SELLERS, BUYERS)
+    measurements, forecasts = deviations.apply(
+        _plan(sigma=0.0, arm=deviations.NONE), clearing, BASE_SLOT)
+
+    assert set(measurements) == {a for a, _r, _al in SELLERS + BUYERS}
+    for area, _requested, allocated in SELLERS + BUYERS:
+        assert measurements[area] == allocated, area
+    assert set(forecasts) == {a for a, _r, _al in SELLERS}
+    for area, _requested, allocated in SELLERS:
+        assert forecasts[area] == allocated, area
+
+    # And it is exact rather than "within a tolerance": at sigma = 0 the
+    # noise is 0.0 by construction, not a draw from a degenerate Gaussian.
+    assert deviations._noise(random.Random(1), 0.0) == 0.0
+    again = deviations.apply(_plan(sigma=0.0, arm=deviations.NONE),
+                             clearing, BASE_SLOT + 900)
+    assert again == (measurements, forecasts), "no slot-to-slot variation"

@@ -117,6 +117,12 @@ def plan_deviations(spec, players, batteries=()) -> DeviationPlan:
 
 
 def _noise(rng, sigma: float) -> float:
+    """Clipped Gaussian, and exactly 0.0 at `sigma = 0`.
+
+    Returning 0.0 rather than drawing from a degenerate Gaussian keeps the
+    noise-free cell bit-exact against the allocation, and keeps it
+    independent of how many times the RNG happened to be advanced before it.
+    """
     if sigma <= 0.0:
         return 0.0
     return max(-_CLIP_SIGMA * sigma,
@@ -140,6 +146,14 @@ def apply(plan: DeviationPlan, clearing: dict, slot: int) -> tuple:
     externality is silent unless someone withholds. Buyers carry no forecast:
     the buyer externality reads the meter against the bid and never touches
     the forecast channel.
+
+    **At `sigma = 0` every allocated area still gets a measurement**, equal
+    to its allocation to the response's own six decimals. That is deliberate
+    and is what `b2_noise_off` rests on (D-84): the execution node falls back
+    to "no measurement -> delivered == traded" for an area it finds no meter
+    reading for, and a reference cell that was clean only because the harness
+    posted nothing would be measuring that fallback instead of the mechanism.
+    The write path is exercised in every arm, at every sigma.
 
     The two named arms:
 

@@ -275,11 +275,62 @@ MUTUAL_SENSITIVITY = (0.25, 0.75)
 # always 0, `crossover_mult` is therefore None everywhere, and the green bonus
 # is unfundable at every value of G. What `multipliers_on` measures on this
 # week is the grey levy and the pool surplus it leaves behind, not the
-# bonus/levy trade-off. Changing it means changing the battery windows, which
-# is a D-75 decision and not a harness one.
+# bonus/levy trade-off. That finding is what D-83 and `OVERLAP_EVENING_PERIODS`
+# answer; the reference cells stay as they are.
+#
+# SECOND NOTE, measured on the D-83 overlap window where the crossover can be
+# read per slot at all, and again reported rather than acted on: **0.02 is far
+# below the crossover there, not near it.** Between 15:00 and 19:00 the
+# battery dominates, so `grey/green` runs 1.09 .. 207 (median 5.25) and
+# `crossover_mult = 0.10 * grey/green` runs 0.109 .. 20.7 (median 0.52). The
+# levy therefore over-funds the bonus by a factor of 5 to 80 in every overlap
+# slot, `bonus_scale` is 1 in all 70 (the 23 slots reading 0.999... are the
+# 6-decimal rounding of `green_final`, not a shortfall), and both formulations
+# pay the full `p * (1 + G)` on the green side -- which is why they are
+# indistinguishable in `green_final_ct` and differ everywhere else.
+#
+# Separating them on the green side would need G above the median crossover,
+# i.e. a bonus over 50 %, which is not a parameter anyone would defend. The
+# green-side coincidence is therefore a property of this supply mix and
+# belongs in 5.2 as one; the formulation comparison itself is carried by the
+# grey rate, the levy and the pool surplus, which do separate in all 70 slots.
 GREEN_MULTIPLIER = 0.02
 GREY_LEVY = 0.10
 LEVY_CAP = 0.20
+
+# D-83. The declared scenario variant the formulation comparison runs on.
+#
+# The finding above is the reason it exists: on the reference window the two
+# formulations cannot be told apart, because neither pays a bonus. This window
+# is 15:00-19:00 (periods 61..76, labelled by their end), so periods 61..71
+# overlap the PV that runs to 17:45 and a slot can carry both a green and a
+# grey offer. Same week, same 15 units, same charging rule -- only the
+# discharge window moves.
+#
+# **It is compared within its own group, never against `baseline_pro_rata`.**
+# A different battery window is a different supply curve and therefore a
+# different ratio distribution: a delta against the reference cells would be
+# reading the window change, not the multiplier. `mult_overlap_off` is that
+# group's own baseline and is the only thing the two formulation cells are
+# subtracted from. Measured at seed 0: the group's census is 124/159/389
+# (supply-/demand-limited/no-trade) against 235/118/319 on the reference
+# window, which is how large that difference is and why the two groups may
+# not be put in one table.
+#
+# Measured at seed 0, 70 overlap slots (10 per day, every day of the week):
+#
+# * the bonus is funded and paid in all 70, so the group does what it exists
+#   for -- `bonus_paid_ct` is 60.21 ct over the week against 0.00 on the
+#   reference window at any `green_multiplier`;
+# * the two formulations separate in `grey_final_ct`, `levy_collected_ct`,
+#   `sellers_receive_ct` and `pool_surplus_ct` in **70 of 70** slots. The
+#   multiplicative levy collects 1356.85 ct to fund a 60.21 ct bonus and the
+#   pool retains 1296.64 ct; the additive one collects exactly what the bonus
+#   costs and leaves 0.0003 ct. That over-collection is the formulation
+#   property `MultiplierResult` documents, and it is what D-38 compares;
+# * they do **not** separate in `green_final_ct` (2 of 70, and those two by
+#   1e-6, which is rounding). See `GREEN_MULTIPLIER` for why.
+OVERLAP_EVENING_PERIODS = tuple(range(61, 77))
 
 # The green-share axis as its own cell group (D-76). Deliberately not a factor
 # over the mechanism cells above: crossing them would turn block 1 into fifty
@@ -343,7 +394,7 @@ def spec_for(cell: str, seed: int, **overrides) -> runs.RunSpec:
 
 
 def block1_grid() -> dict:
-    """Block 1's second pass: 16 cells.
+    """Block 1's second pass: 19 cells.
 
     The first pass had four mechanism cells and they produced byte-identical
     slot CSVs, for two reasons that are both closed now: the profile path
@@ -351,6 +402,10 @@ def block1_grid() -> dict:
     mechanism changes (Code To-Do 3.11). The order axis is therefore crossed
     with a *density* axis here -- "preferences first" is not a treatment
     unless there are preferences to serve first.
+
+    The last group before the green-share axis, `mult_overlap_*`, runs on a
+    declared scenario variant of its own (D-83) and is read only against its
+    own baseline; see `OVERLAP_EVENING_PERIODS`.
     """
     grid = {"baseline_pro_rata": {"preferences": BASELINE_PREFERENCES}}
 
@@ -386,6 +441,23 @@ def block1_grid() -> dict:
                                  grey_levy=GREY_LEVY, levy_cap=LEVY_CAP),
             "named_share": 0.50, "mutual_share": REFERENCE_MUTUAL}
 
+    # D-83. The formulation comparison, on its own declared scenario variant
+    # and with its own baseline. `multipliers_on` / `multipliers_on_additive`
+    # above stay on the reference window, where they measure the levy and the
+    # pool surplus 5.2 reports; the bonus is measured here, because here there
+    # is a slot in which it can be funded at all.
+    overlap = {"named_share": 0.50, "mutual_share": REFERENCE_MUTUAL,
+               "evening_periods": OVERLAP_EVENING_PERIODS}
+    grid["mult_overlap_off"] = {
+        **overlap, "preferences": prefs(multipliers_enabled=False)}
+    for mode in ("multiplicative", "additive"):
+        grid[f"mult_overlap_{mode}"] = {
+            **overlap,
+            "preferences": prefs(multipliers_enabled=True, mode=mode,
+                                 sides="seller",
+                                 green_multiplier=GREEN_MULTIPLIER,
+                                 grey_levy=GREY_LEVY, levy_cap=LEVY_CAP)}
+
     # The green-share axis: five cells at the baseline preference set, varying
     # nothing but `participation`. Note that `green_share_000` fits on fewer
     # slots than the rest -- with no battery areas the community has no supply
@@ -402,15 +474,30 @@ def block1_grid() -> dict:
 
 
 def block2_grid() -> dict:
-    """Block 2: 13 cells, every one of them executing (D-72).
+    """Block 2: 14 cells, every one of them executing (D-72).
 
     `RunSpec.execute` defaulted to False and no cell set it, so no campaign
     run has ever executed. These do. `gamma` is read off the execution node's
     own configuration rather than restated here, so the manifest records the
     number the service actually used.
 
-    `b2_noise_only` is the reference the two strategic arms are read against:
-    the accidental layer on its own, no named deviator, at the same sigma.
+    Two references, not one. `b2_noise_only` is the accidental layer on its
+    own at the campaign sigma, and `b2_noise_off` is the same cell at
+    `sigma = 0` (D-84).
+
+    The second one exists because the buyer externality carries no eta
+    deadband -- that is the mechanism's own specification, not an oversight
+    in the harness ("No eta tolerance for buyers in the spec",
+    `penalties.py`). A buyer in a DEMAND_LIMITED round is filled completely,
+    so `actual = allocated * (1 + eps)` exceeds its bid whenever `eps > 0`
+    and is penalised as under-reporting. Measured on the reference week at
+    sigma = 0.05: a penalty pool in 147 of 353 executed slots against 29 for
+    the named deviator alone, with up to 38 "deviators" in a single slot.
+    **The noise stays on in every arm** -- a buyer side that tolerates no
+    forecast error is a finding for 5.3 and Chapter 6, not something to
+    configure away -- and `b2_noise_off` is what separates that floor from
+    the named deviator's signal.
+
     Preferences are off throughout -- block 2 measures the penalty layer, and
     crossing it with the preference axis would answer a question nobody asked.
     """
@@ -422,7 +509,12 @@ def block2_grid() -> dict:
                 "deviation": {"arm": arm, "share": share, "k": k,
                               "sigma": SIGMA, "seed": DEVIATION_SEED}}
 
-    grid = {"b2_noise_only": cell(deviations.NONE, 0.0, 0)}
+    grid = {"b2_noise_only": cell(deviations.NONE, 0.0, 0),
+            "b2_noise_off": {**cell(deviations.NONE, 0.0, 0),
+                             "deviation": {"arm": deviations.NONE,
+                                           "share": 0.0, "k": 0,
+                                           "sigma": 0.0,
+                                           "seed": DEVIATION_SEED}}}
     for arm, prefix in ((deviations.SELLER_ARM, "b2_sell"),
                         (deviations.BUYER_ARM, "b2_buy")):
         # How hard one deviator deviates.
@@ -544,21 +636,25 @@ def report(results) -> None:
     `runs.execute_run`, so a cell that never varied never gets this far --
     a guard that is never called is not a guard.
 
-    Beyond the guards, two result columns: `pairs_posted` for block 1 and the
-    summed `penalty_pool_ct` for block 2. Both exist so an empty result is
-    visible in the console rather than only six weeks later in a CSV -- the
-    first pass printed clean guards for four cells that had produced the same
-    file, and nothing on this line said so.
+    Beyond the guards, three result columns: `pairs_posted` for block 1, the
+    summed `penalty_pool_ct` for block 2 and the summed `bonus_paid_ct` for
+    the D-83 overlap group. All three exist so an empty result is visible in
+    the console rather than only six weeks later in a CSV -- the first pass
+    printed clean guards for four cells that had produced the same file, and
+    nothing on this line said so. `bonus_paid_ct` is the one that says
+    whether an overlap cell actually found a slot to pay a bonus in.
     """
     for result in results:
         checks = result["checks"]
         posted = _csv_column_sum(result["csv"], "pairs_posted")
         pool = _csv_column_sum(result["csv"], "penalty_pool_ct")
+        bonus = _csv_column_sum(result["csv"], "bonus_paid_ct")
         print(f"  {result['run_id']:<32} "
               f"slots={checks['n_slots']:<4} "
               f"ratio_span={checks['ratio_span']:<10} "
               f"pairs_posted={posted:<10.0f} "
               f"penalty_pool_ct={pool:<12.3f} "
+              f"bonus_paid_ct={bonus:<10.3f} "
               f"{checks['round_type_census']}")
 
 

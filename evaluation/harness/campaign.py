@@ -609,8 +609,8 @@ def run_parallel(specs, *, processes=None, sha=None) -> list:
     sha = sha or repo_sha()
     context = multiprocessing.get_context("spawn")
     processes = processes or min(len(specs), multiprocessing.cpu_count())
-    with context.Pool(processes) as pool:
-        return pool.map(_worker, [(spec, sha) for spec in specs])
+    with context.Pool(processes, maxtasksperchild=1) as pool:
+       return pool.map(_worker, [(spec, sha) for spec in specs], chunksize=1)
 
 
 def run_sequential(specs, *, sha=None) -> list:
@@ -700,16 +700,33 @@ def redirect(specs, out_dir):
     return [dataclasses.replace(spec, out_dir=str(root / spec.run_id))
             for spec in specs]
 
+def resume(specs, out_dir=None) -> list:
+    """`--resume`: skip every run whose manifest already exists.
+
+    The manifest is written last in `execute_run`, after the CSVs and the
+    pre-flight checks, so its presence means the run completed. A directory
+    without one is an aborted run and is re-done.
+    """
+    root = Path(out_dir) if out_dir else OUT
+    todo = [s for s in specs if not (root / s.run_id / "manifest.json").exists()]
+    print(f"resume: {len(specs) - len(todo)} runs already complete, "
+          f"{len(todo)} to run")
+    return todo
 
 async def main(block=None, out_dir=None):
     """The profile campaign: every cell at five seeds, one process per run."""
     started = time.perf_counter()
     specs = redirect(cells(block), out_dir)
+    if "--resume" in sys.argv:
+        specs = resume(specs, out_dir)
     n_cells = len({spec.cell for spec in specs})
     name = {1: "block 1", 2: "block 2",
             "calibration": "calibration"}.get(block, "all blocks")
     print(f"campaign ({name}): {len(specs)} runs over {n_cells} cells, "
           f"one process each")
+    if not specs:
+        print("nothing to run")
+        return
     results = run_parallel(specs)
     report(results)
     print(f"\n{len(results)} runs in {time.perf_counter() - started:.1f}s")

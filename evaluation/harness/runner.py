@@ -13,7 +13,7 @@ import hashlib
 import struct
 
 SLOT_SEC = 900
-SIGMOID = {"k_upper": 40.0, "k_lower": 8.0, "theta": 1.0, "steepness": 2.5}
+SIGMOID = {"k_upper": 40.0, "k_lower": 8.0, "theta": 1.0, "steepness": 0.6}
 
 
 def market_id_for(community: str, slot: int) -> str:

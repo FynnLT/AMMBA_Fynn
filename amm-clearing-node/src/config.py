@@ -69,7 +69,7 @@ class CommunityParams:
     k_upper: float = 40.0   # retail buy price, ct/kWh
     k_lower: float = 8.0    # feed-in tariff, ct/kWh
     theta: float = 1.0      # sigmoid midpoint (optimized offline)
-    steepness: float = 2.5  # sigmoid steepness B (optimized offline)
+    steepness: float = 0.6  # sigmoid steepness B (optimized offline)
     pool_id: str | None = None
 
     def pool_for(self, community_uuid: str) -> str:
@@ -182,7 +182,7 @@ def _community_from_yaml(raw: dict) -> CommunityParams:
         k_upper=float(raw.get("k_upper_ct_per_kwh", 40.0)),
         k_lower=float(raw.get("k_lower_ct_per_kwh", 8.0)),
         theta=float(raw.get("theta", 1.0)),
-        steepness=float(raw.get("steepness", 2.5)),
+        steepness=float(raw.get("steepness", 0.6)),
         pool_id=raw.get("pool_id"),
     )
 

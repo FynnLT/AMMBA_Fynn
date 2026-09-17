@@ -63,7 +63,7 @@ communities:
     k_upper_ct_per_kwh: 40.0      # Retail buy price
     k_lower_ct_per_kwh: 8.0       # Feed-in tariff
     theta: 1.0                    # Sigmoid midpoint (optimized offline)
-    steepness: 2.5                # Sigmoid steepness (optimized offline)
+    steepness: 0.6                # Sigmoid steepness (optimized offline)
     # TODO(confirm-with-supervisor): pool naming convention + whether the pool
     # must be registered as an area in community_areas (guide §7.1).
     pool_id: "AMM_POOL_communityid_1"

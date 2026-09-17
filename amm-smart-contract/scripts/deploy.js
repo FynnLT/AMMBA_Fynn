@@ -24,10 +24,10 @@ function toBytes32(value) {
 // Defaults from amm-clearing-node/configuration.yaml, scaled by 10000.
 const SCALE = 10000;
 const COMMUNITY_DEFAULTS = {
-  kUpper: BigInt(Math.round(28.5 * SCALE)), // retail buy price ct/kWh
+  kUpper: BigInt(Math.round(40.0 * SCALE)), // retail buy price ct/kWh
   kLower: BigInt(Math.round(8.0 * SCALE)),  // feed-in tariff ct/kWh
   theta: BigInt(Math.round(1.0 * SCALE)),
-  steepness: BigInt(Math.round(2.5 * SCALE)),
+  steepness: BigInt(Math.round(0.6 * SCALE)),
 };
 
 async function main() {

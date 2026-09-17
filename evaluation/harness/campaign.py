@@ -258,7 +258,7 @@ GREEN_SHARES = (0.0, 0.25, 0.50, 0.75, 1.0)
 # runs below are at the harness default (theta 1.0, steepness 2.5), not at the
 # community configuration -- and every manifest entry records which, because
 # the clearing response carries `sigmoid_params` back.
-CALIBRATED_SIGMOID = None
+CALIBRATED_SIGMOID = {"k_upper": 40.0, "k_lower": 8.0, "theta": 1.0, "steepness": 0.6}
 BASELINE_PREFERENCES = dict(PREF_OFF)
 
 

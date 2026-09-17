@@ -19,7 +19,7 @@
  *   DEPLOYER_PRIVATE_KEY   the contract owner — setCommunityParams is onlyOwner
  *   COMMUNITY_UUID         community id string (required)
  *   K_UPPER K_LOWER THETA STEEPNESS   ct/kWh and dimensionless, unscaled
- *                          (defaults: 28.5 / 8.0 / 1.0 / 2.5, i.e. the values
+ *                          (defaults: 40.0 / 8.0 / 1.0 / 0.6, i.e. the values
  *                          in amm-clearing-node/configuration.yaml)
  */
 const { ethers } = require("hardhat");
@@ -58,8 +58,8 @@ async function main() {
   }
 
   const id = toBytes32(communityUuid);
-  const params = [scaled("K_UPPER", 28.5), scaled("K_LOWER", 8.0),
-                  scaled("THETA", 1.0), scaled("STEEPNESS", 2.5)];
+  const params = [scaled("K_UPPER", 40.0), scaled("K_LOWER", 8.0),
+                  scaled("THETA", 1.0), scaled("STEEPNESS", 0.6)];
 
   console.log(`contract   ${address}`);
   console.log(`community  ${communityUuid}`);

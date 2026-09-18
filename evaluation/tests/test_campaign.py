@@ -42,8 +42,14 @@ def test_five_seeds_per_cell_recorded_individually():
         assert len({s.run_id for s in specs}) == n_runs
 
     # The groups are disjoint and `cells()` is their union plus calibration.
+    # The sweep's cells are named `b2_*` because they are block 2's
+    # configuration with one parameter moved, but they are their own group
+    # and must not collide with the cells they are read against.
+    sweep = campaign.cells("sweep")
     assert not {s.cell for s in block1} & {s.cell for s in block2}
-    assert len(campaign.cells()) == 95 + 70 + 6
+    assert not {s.cell for s in sweep} & ({s.cell for s in block1}
+                                          | {s.cell for s in block2})
+    assert len(campaign.cells()) == 95 + 70 + 50 + 6
 
 
 def test_block_two_executes_and_block_one_does_not():
@@ -125,6 +131,111 @@ def test_the_two_noise_references_differ_only_in_sigma():
         return {k: v for k, v in spec.config().items() if k not in keys}
 
     assert without(on, "deviation", "cell") == without(off, "deviation", "cell")
+
+
+# ------------------------------------------------- the gamma/eta sweep
+
+def test_the_sweep_is_ten_cells_at_five_seeds():
+    """D-26/B-10. The parameter axis block 2 does not carry: all 70 of its
+    runs sat at one point of the (gamma, eta) plane."""
+    specs = campaign.cells("sweep")
+    # Written out rather than derived from the grid under test, as above: a
+    # count computed from `sweep_grid()` itself cannot notice it losing a
+    # cell. Four eta points, four gamma points, two controls -- 10 cells,
+    # 50 runs.
+    assert len(specs) == 50
+
+    by_cell = {}
+    for spec in specs:
+        by_cell.setdefault(spec.cell, []).append(spec.seed)
+    assert len(by_cell) == 10
+    assert sorted(by_cell) == [
+        "b2_eta000", "b2_eta005", "b2_eta015", "b2_eta025",
+        "b2_sell_s20", "b2_sell_s25_g300",
+        "b2_short_g110", "b2_short_g150", "b2_short_g200", "b2_short_g300"]
+    for cell, seeds in by_cell.items():
+        assert seeds == list(campaign.SEEDS), cell
+    assert len({s.run_id for s in specs}) == 50
+
+    assert campaign.parse_block(["campaign.py", "--block", "sweep"]) == "sweep"
+    # And the reference point is deliberately absent: `b2_sell_s25` at
+    # `eta_relative = 0.10` *is* it, and `write_manifest` appends, so a
+    # re-run would add a second entry to the manifest 5.3 is written against.
+    assert campaign.ETA_RELATIVE not in campaign.SWEEP_ETAS
+
+
+def test_each_sweep_axis_varies_exactly_one_parameter():
+    """An axis is only an axis if one thing moves along it. Both of these
+    are read against `b2_sell_s25`, which is the point they omit."""
+    specs = campaign.cells("sweep")
+    for spec in specs:
+        assert spec.execute is True, spec.cell
+        assert isinstance(spec.deviation, dict), spec.cell
+        assert spec.deviation["arm"] in campaign.deviations.ARMS, spec.cell
+        # Explicit, never left to the service's configuration: a sweep CSV
+        # whose own parameter is not in its manifest cannot be read at all.
+        assert spec.eta_relative is not None, spec.cell
+        assert spec.gamma is not None, spec.cell
+        assert spec.deviation["sigma"] == campaign.SIGMA, spec.cell
+        assert spec.deviation["seed"] == campaign.DEVIATION_SEED, spec.cell
+        assert spec.deviation["k"] == 1, spec.cell
+        assert spec.preferences == campaign.BASELINE_PREFERENCES, spec.cell
+        assert spec.participation == campaign.REFERENCE_PARTICIPATION
+        assert spec.sigmoid == campaign.CALIBRATED_SIGMOID, spec.cell
+
+    by_cell = {spec.cell: spec for spec in specs if spec.seed == 0}
+
+    def without(spec, *keys):
+        data = spec.config()
+        for key in ("cell", "seed", "dataset_extension_seed") + keys:
+            data.pop(key, None)
+        return json.dumps(data, sort_keys=True)
+
+    # The eta axis: `eta_relative` moves, on the withholding arm, at the
+    # configured gamma. Nothing else.
+    eta_cells = [by_cell[f"b2_eta{int(e * 100):03d}"] for e in campaign.SWEEP_ETAS]
+    assert [c.eta_relative for c in eta_cells] == list(campaign.SWEEP_ETAS)
+    assert len({without(c, "eta_relative") for c in eta_cells}) == 1
+    assert {c.deviation["arm"] for c in eta_cells} == {"sellers_withhold"}
+    assert {c.gamma for c in eta_cells} == {campaign.execution_gamma()}
+
+    # The gamma axis: `gamma` moves, on the under-delivery arm, which is the
+    # only arm the shortfall term -- and therefore gamma -- is visible in.
+    gamma_cells = [by_cell[f"b2_short_g{int(g * 100):03d}"]
+                   for g in campaign.SWEEP_GAMMAS]
+    assert [c.gamma for c in gamma_cells] == list(campaign.SWEEP_GAMMAS)
+    assert len({without(c, "gamma") for c in gamma_cells}) == 1
+    assert {c.deviation["arm"] for c in gamma_cells} == {"sellers_underdeliver"}
+    assert {c.eta_relative for c in gamma_cells} == {campaign.ETA_RELATIVE}
+
+
+def test_the_two_sweep_controls_move_one_thing_off_the_block_two_cell():
+    """`b2_sell_s25_g300` is the measured demonstration that gamma does not
+    touch withholding: it is `b2_sell_s25` at gamma 3.0 and is expected to be
+    identical to it in every penalty column. `b2_sell_s20` fills the gap in
+    block 2's share axis at the reference eta."""
+    reference = next(s for s in campaign.cells(2)
+                     if s.cell == "b2_sell_s25" and s.seed == 0)
+    by_cell = {s.cell: s for s in campaign.cells("sweep") if s.seed == 0}
+
+    def without(spec, *keys):
+        data = spec.config()
+        for key in ("cell",) + keys:
+            data.pop(key, None)
+        return data
+
+    at_gamma_three = by_cell["b2_sell_s25_g300"]
+    assert at_gamma_three.gamma == 3.0
+    assert reference.gamma == campaign.execution_gamma() != 3.0
+    assert without(at_gamma_three, "gamma") == without(reference, "gamma")
+
+    at_share_twenty = by_cell["b2_sell_s20"]
+    assert at_share_twenty.deviation["share"] == 0.20
+    assert reference.deviation["share"] == 0.25
+    assert without(at_share_twenty, "deviation") == \
+        without(reference, "deviation")
+    assert {k: v for k, v in at_share_twenty.deviation.items() if k != "share"} \
+        == {k: v for k, v in reference.deviation.items() if k != "share"}
 
 
 def test_the_density_cells_differ_in_nothing_but_the_two_shares():

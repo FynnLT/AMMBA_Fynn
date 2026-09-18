@@ -60,11 +60,23 @@ DERIVED_FIELDS = ("crossover_mult",)
 #: the node's own statement of whether the rule's Sum (p - p_cf) * q_i closed,
 #: and the +-0 test in 5.3 reads this column. A harness that recomputed it
 #: would be testing its own arithmetic against itself.
+#:
+#: The last four are the execution response's `penalty_params` block
+#: (`execution.py:246-253`), and they are here because the parameter sweep
+#: needs them: `gamma: None` in a spec means "whatever the execution node's
+#: configuration held that day", which is Finding C in a second place, and a
+#: sweep CSV that does not carry its own gamma cannot be read without its
+#: manifest. `_eff` where `RunSpec` carries a field of the same name, so a
+#: configured value and an applied one can never be confused for each other;
+#: `k_sho_ct_per_kwh` is the node's own `gamma * k_upper` and is the column
+#: the gamma axis of 5.3 is read from.
 EXECUTION_FIELDS = ("round_type_exec", "total_penalties_ct", "penalty_pool_ct",
                     "compensated_ct", "budget_balance_ct", "n_excluded",
                     "n_harmed", "harmed_side", "n_deviators", "n_shortfall",
                     "withheld_kwh", "underreported_kwh",
-                    "shortfall_penalty_ct", "externality_penalty_ct")
+                    "shortfall_penalty_ct", "externality_penalty_ct",
+                    "gamma_eff", "eta_relative_eff", "eta_mode",
+                    "k_sho_ct_per_kwh")
 
 FIELDS = (BASE_FIELDS + PREFERENCE_FIELDS + MULTIPLIER_FIELDS
           + SCENARIO_FIELDS + DERIVED_FIELDS + EXECUTION_FIELDS)
@@ -97,6 +109,7 @@ def _execution_row(execution: dict | None) -> dict:
         return dict.fromkeys(EXECUTION_FIELDS)
 
     redistribution = execution.get("redistribution") or {}
+    penalty_params = execution.get("penalty_params") or {}
     results = execution.get("results") or []
     sellers = [r for r in results if r.get("role") == "seller"]
     buyers = [r for r in results if r.get("role") == "buyer"]
@@ -124,6 +137,14 @@ def _execution_row(execution: dict | None) -> dict:
         "underreported_kwh": total(buyers, "externality_kwh"),
         "shortfall_penalty_ct": total(results, "shortfall_penalty_ct"),
         "externality_penalty_ct": total(results, "externality_penalty_ct"),
+
+        # The parameters the round was actually penalised under, off the
+        # node's own `penalty_params`. Copied, never recomputed from the
+        # spec: the spec is what was asked for and this is what applied.
+        "gamma_eff": penalty_params.get("gamma"),
+        "eta_relative_eff": penalty_params.get("eta_relative"),
+        "eta_mode": penalty_params.get("eta_mode"),
+        "k_sho_ct_per_kwh": penalty_params.get("k_sho_ct_per_kwh"),
     }
 
 

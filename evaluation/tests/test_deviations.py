@@ -122,6 +122,53 @@ def test_the_buyer_arm_over_consumes_against_its_own_bid():
     assert not any(a.startswith("player-01") for a in forecasts)
 
 
+def test_the_shortfall_arm_under_delivers_on_the_meter_and_forecasts_honestly():
+    """D-26. The one arm `gamma` is visible in.
+
+    `gamma` enters the artifact at exactly one place -- `k_sho = gamma *
+    k_upper` inside the seller shortfall term (`penalties.py:41`) -- and the
+    shortfall is `max(0, traded - delivered - eta)`. `sellers_withhold`
+    leaves the meter at the traded quantity, so the term is identically zero
+    there and `gamma` multiplies a zero. Here the meter reads
+    `allocated * (1 - share)` and the forecast is the honest deliverable, so
+    the externality is silent and the shortfall term acts alone.
+    """
+    plan = _plan(arm=deviations.SELLER_SHORTFALL_ARM, share=0.25, k=1,
+                 deviators=("player-002",))
+    measurements, forecasts = deviations.apply(
+        plan, _clearing(SELLERS, BUYERS), BASE_SLOT)
+
+    assert measurements["player-002"] == pytest.approx(2.4 * 0.75)  # noise off
+    # The honest deliverable, unchanged from the non-deviating path: with
+    # `forecast == traded` the seller externality is
+    # `max(0, traded - traded - eta) = 0` whatever eta is.
+    assert forecasts["player-002"] == pytest.approx(2.4)
+
+    for area, _requested, allocated in SELLERS:
+        if area == "player-002":
+            continue
+        assert forecasts[area] == allocated
+        assert measurements[area] == pytest.approx(allocated, rel=4 * 0.05)
+
+    assert "player-010" not in forecasts and "player-011" not in forecasts
+
+
+def test_the_shortfall_arm_is_a_known_arm_and_a_typo_is_still_not():
+    """The arm has to be plannable, and the guard has to stay a guard."""
+    spec = runs.RunSpec(run_id="d", seed=0, execute=True,
+                        deviation={"arm": deviations.SELLER_SHORTFALL_ARM,
+                                   "share": 0.25, "k": 1, "sigma": 0.05,
+                                   "seed": 20260919})
+    plan = deviations.plan_deviations(spec, list(range(10)))
+    assert plan.arm == "sellers_underdeliver"
+    assert len(plan.deviators) == 1
+
+    unknown = runs.RunSpec(run_id="d", seed=0, execute=True,
+                           deviation={"arm": "sellers_underdeliver_", "k": 1})
+    with pytest.raises(deviations.DeviationError):
+        deviations.plan_deviations(unknown, list(range(10)))
+
+
 def test_an_absent_deviator_deviates_nothing_and_is_counted():
     plan = _plan(arm=deviations.SELLER_ARM, share=0.25, k=1,
                  deviators=("player-099",))
@@ -158,7 +205,7 @@ def test_the_plan_draws_households_only_and_never_a_battery():
 
 def test_an_unknown_arm_or_an_impossible_coalition_is_refused():
     spec = runs.RunSpec(run_id="d", seed=0, execute=True,
-                        deviation={"arm": "sellers_underdeliver", "k": 1})
+                        deviation={"arm": "sellers_overdeliver", "k": 1})
     with pytest.raises(deviations.DeviationError):
         deviations.plan_deviations(spec, list(range(10)))
 
@@ -241,6 +288,79 @@ async def test_the_deviation_reaches_the_penalty_on_a_real_slot(st):
     charged = [r["area_uuid"] for r in withheld["execution"]["results"]
                if r["externality_penalty_ct"] > 0]
     assert charged == [seller]
+
+
+@pytest.mark.anyio
+async def test_the_shortfall_arm_separates_the_two_penalty_channels(st):
+    """D-26. The test the gamma axis rests on.
+
+    On 3422529 this could not have passed at any parameter point: both arms
+    left the meter at the traded quantity, so `seller_shortfall_penalty`
+    returned 0 in every executed slot of the campaign and `gamma` was
+    unobservable. Here the named seller under-delivers, and the assertion is
+    the *separation* -- a shortfall and no externality -- not just a non-zero
+    number.
+    """
+    community = profiles.load_community()
+    players = profiles.select_players(community.flags, n=100, seed=20260916)
+    batteries = profiles.make_battery_areas(community.bess, players,
+                                            participation=0.25, seed=7)
+    week = profiles.extend_to_week(community.day_kwh(players), seed=4242,
+                                   days=1)
+
+    # A SUPPLY_LIMITED slot, which is where the seller externality *would*
+    # fire if the arm touched the forecast channel. That it does not is the
+    # measurement.
+    index, scen = next(
+        (i, s) for i in range(week.n_slots)
+        for s in [scenario.make_scenario_from_profiles(week, i, batteries)]
+        if 0 < s["posted_supply_kwh"] < s["posted_demand_kwh"]
+        and len(s["producers"]) >= 3 and len(s["consumers"]) >= 3)
+
+    seller = sorted(p["area_uuid"] for p in scen["producers"])[0]
+    share, eta_relative, gamma = 0.25, 0.10, 1.1
+    plan = deviations.DeviationPlan(arm=deviations.SELLER_SHORTFALL_ARM,
+                                    share=share, k=1, sigma=0.0,
+                                    deviators=(seller,))
+    try:
+        result = await runner.run_slot(
+            st, scen, community="s3-shortfall", slot=BASE_SLOT,
+            market_id=runner.market_id_for("s3-shortfall", BASE_SLOT),
+            preferences={"enabled": False, "multipliers_enabled": False},
+            execute=True, gamma=gamma, eta_relative=eta_relative,
+            deviate=lambda clearing, slot: deviations.apply(plan, clearing,
+                                                            slot))
+    finally:
+        await st.close()
+
+    execution = result["execution"]
+    assert execution["round_type"] == "SUPPLY_LIMITED"
+
+    row = next(r for r in execution["results"] if r["area_uuid"] == seller)
+    assert row["role"] == "seller"
+    assert row["shortfall_penalty_ct"] > 0
+    # The whole point of the arm: the forecast is honest, so the externality
+    # channel stays silent while the shortfall one fires.
+    assert row["externality_penalty_ct"] == 0.0
+
+    # And the arithmetic the arm is specified by, read off the response's own
+    # traded quantity rather than off the scenario.
+    q = row["traded_kwh"]
+    k_upper = execution["sigmoid_params"]["k_upper"]
+    assert row["actual_kwh"] == pytest.approx(q * (1.0 - share), abs=1e-5)
+    assert row["deliverable_kwh"] == pytest.approx(q, abs=1e-5)
+    assert row["deliverable_source"] == "forecast"
+    assert row["shortfall_kwh"] == pytest.approx(
+        q * (share - eta_relative), abs=1e-5)
+    assert row["shortfall_penalty_ct"] == pytest.approx(
+        gamma * k_upper * q * (share - eta_relative), abs=1e-3)
+
+    # Nobody carries an externality penalty at all, so the redistribution has
+    # no pool to distribute: the shortfall channel does not feed it (D-61).
+    assert all(r["externality_penalty_ct"] == 0.0
+               for r in execution["results"])
+    assert execution["redistribution"]["penalty_pool_ct"] == 0.0
+    assert execution["redistribution"]["budget_balance_ct"] == 0.0
 
 
 # ---------------------------------------------------- the noise-free cell

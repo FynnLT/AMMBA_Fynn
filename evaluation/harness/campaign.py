@@ -373,6 +373,46 @@ COALITION_SIZES = (2, 5, 10)
 DEVIATION_SEED = 20260919
 
 
+# ----------------------------------------------------------- the sweep
+
+# D-26/B-10. The parameter axis block 2 does not carry. All 70 block-2 runs
+# sat at one point of the (gamma, eta) plane -- gamma at the execution node's
+# configured value, `eta_relative = 0.10` -- while the published framework
+# constrains gamma only by `gamma > 1` and eta only by `eta_t >= 0`, with no
+# derivation and no sensitivity analysis anywhere. This group is that
+# sensitivity analysis.
+#
+# The gamma axis. Written out rather than read off the configuration, unlike
+# every other use of gamma in this file: these four are the *axis*, and each
+# cell is named after the value it holds, so a `b2_short_g110` that silently
+# followed a re-configured node would be a cell whose name lied. 1.1 is the
+# node's configured value today (`execution_gamma()`), which is what makes
+# the first point of the axis the point block 2 already ran at.
+#
+# `Phi = gamma * K_upper * shortfall` is linear in gamma by construction, so
+# this axis holds no surprise in its magnitude and 5.3 must not present one.
+# What it measures is the ratio of the two penalty channels at a comparable
+# deviation, whether the redistribution stays budget-balanced as the pool
+# grows, and the one sharp RQ2 statement the plane supports: raising gamma
+# deters under-delivery and does nothing at all against withholding.
+SWEEP_GAMMAS = (1.1, 1.5, 2.0, 3.0)
+
+# The eta axis, and the substantive one: eta moves `W_sell = max(0, forecast
+# - traded - eta)`, so at `eta_relative = share` the deviation is
+# extinguished exactly. `0.10` is deliberately absent -- `b2_sell_s25` *is*
+# that point, both axes are read against it, and re-running it into `out/`
+# would append a second entry to the manifest the 17./18.09. campaign is
+# written against (`write_manifest` appends, it does not replace).
+#
+# `b2_eta000` will show a far larger penalty population than the other three,
+# and it is not the deviator: at `eta_relative = 0` the deadband no longer
+# absorbs the accidental layer, so every seller whose delivery noise is
+# negative incurs a shortfall. That is the deadband doing its job and is a
+# 5.3 result. The noise stays on, and the eta axis is read from the
+# deviator's own `_areas.csv` rows, filtered to `manifest.deviation.deviators`.
+SWEEP_ETAS = (0.00, 0.05, 0.15, 0.25)
+
+
 def execution_gamma() -> float:
     """The execution node's own configured gamma, read rather than restated.
 
@@ -526,6 +566,62 @@ def block2_grid() -> dict:
     return grid
 
 
+def sweep_grid() -> dict:
+    """The (gamma, eta) sweep: 10 cells, block 2's reference configuration
+    with exactly one parameter moved (D-26, B-10).
+
+    Every cell runs at `BASELINE_PREFERENCES`, `execute = True`, the campaign
+    `SIGMA`, `DEVIATION_SEED`, `REFERENCE_PARTICIPATION` and
+    `CALIBRATED_SIGMOID` -- i.e. `b2_sell_s25`'s configuration -- so a
+    difference measured along either axis is the parameter and nothing else.
+
+    **The reference point is not in this grid.** `eta_relative = 0.10` at the
+    configured gamma *is* `b2_sell_s25`, both axes are read against it, and
+    re-running it would append a second entry to a manifest the 17./18.09.
+    campaign is written against.
+
+    Three groups, and none of them is a duplicate of another:
+
+    * `b2_eta*` -- the eta axis on the withholding arm, where eta is the
+      deadband of `W_sell` and extinguishes the deviation exactly at
+      `eta_relative = share`. `b2_eta025` is therefore an expected zero and
+      not an empty cell; `b2_sell_s10` at `eta_relative = 0.10` is the same
+      arithmetic already measured in block 2.
+    * `b2_short_g*` -- the gamma axis on the under-delivery arm, which is the
+      only arm gamma is observable in at all (`deviations.py`, fact 4). The
+      four cells share an arm, a share and a deviation seed, so the
+      deviator's measurements are identical across them and the four
+      `shortfall_penalty_ct` values stand in the exact ratio of the gammas.
+    * the two controls. `b2_sell_s25_g300` is `b2_sell_s25` at gamma 3.0 and
+      is **expected to be identical to it in every penalty column** -- that
+      is the point, it is the measured demonstration that gamma does not
+      touch withholding. `b2_sell_s20` fills the gap in block 2's share axis,
+      so the eta axis has a `share - eta` neighbour on the other side.
+    """
+    gamma = execution_gamma()
+
+    def cell(arm, share, *, eta_relative, gamma=gamma):
+        return {"preferences": BASELINE_PREFERENCES, "execute": True,
+                "gamma": gamma, "eta_relative": eta_relative,
+                "deviation": {"arm": arm, "share": share, "k": 1,
+                              "sigma": SIGMA, "seed": DEVIATION_SEED}}
+
+    grid = {f"b2_eta{int(eta * 100):03d}":
+            cell(deviations.SELLER_ARM, REFERENCE_SHARE, eta_relative=eta)
+            for eta in SWEEP_ETAS}
+    grid.update({
+        f"b2_short_g{int(g * 100):03d}":
+        cell(deviations.SELLER_SHORTFALL_ARM, REFERENCE_SHARE,
+             eta_relative=ETA_RELATIVE, gamma=g)
+        for g in SWEEP_GAMMAS})
+    # The two controls, both at the reference eta.
+    grid["b2_sell_s25_g300"] = cell(deviations.SELLER_ARM, REFERENCE_SHARE,
+                                    eta_relative=ETA_RELATIVE, gamma=3.0)
+    grid["b2_sell_s20"] = cell(deviations.SELLER_ARM, 0.20,
+                               eta_relative=ETA_RELATIVE)
+    return grid
+
+
 def _fit_module():
     """`calibration/fit.py`, resolved relative to this file.
 
@@ -575,9 +671,9 @@ def calibration_cells() -> list:
 def cells(block=None) -> list:
     """The campaign grid: every cell at all five seeds.
 
-    `block` selects a group -- 1, 2, "calibration", or None for the union.
-    The first cell of block 1 is the delta baseline itself, so it is produced
-    by the same code path as everything it is subtracted from.
+    `block` selects a group -- 1, 2, "sweep", "calibration", or None for the
+    union. The first cell of block 1 is the delta baseline itself, so it is
+    produced by the same code path as everything it is subtracted from.
     """
     if block == "calibration":
         return calibration_cells()
@@ -586,6 +682,8 @@ def cells(block=None) -> list:
         grid.update(block1_grid())
     if block in (None, 2):
         grid.update(block2_grid())
+    if block in (None, "sweep"):
+        grid.update(sweep_grid())
     specs = [spec_for(cell, seed, **overrides)
              for cell, overrides in grid.items() for seed in SEEDS]
     if block is None:
@@ -636,38 +734,45 @@ def report(results) -> None:
     `runs.execute_run`, so a cell that never varied never gets this far --
     a guard that is never called is not a guard.
 
-    Beyond the guards, three result columns: `pairs_posted` for block 1, the
-    summed `penalty_pool_ct` for block 2 and the summed `bonus_paid_ct` for
-    the D-83 overlap group. All three exist so an empty result is visible in
-    the console rather than only six weeks later in a CSV -- the first pass
-    printed clean guards for four cells that had produced the same file, and
-    nothing on this line said so. `bonus_paid_ct` is the one that says
-    whether an overlap cell actually found a slot to pay a bonus in.
+    Beyond the guards, four result columns: `pairs_posted` for block 1, the
+    summed `penalty_pool_ct` for block 2, the summed `shortfall_penalty_ct`
+    for the sweep and the summed `bonus_paid_ct` for the D-83 overlap group.
+    All four exist so an empty result is visible in the console rather than
+    only six weeks later in a CSV -- the first pass printed clean guards for
+    four cells that had produced the same file, and nothing on this line said
+    so. `bonus_paid_ct` is the one that says whether an overlap cell actually
+    found a slot to pay a bonus in; `shortfall_penalty_ct` is the one that
+    says whether a gamma cell found a shortfall to price at all, which on
+    every arm but `sellers_underdeliver` it does not.
     """
     for result in results:
         checks = result["checks"]
         posted = _csv_column_sum(result["csv"], "pairs_posted")
         pool = _csv_column_sum(result["csv"], "penalty_pool_ct")
+        shortfall = _csv_column_sum(result["csv"], "shortfall_penalty_ct")
         bonus = _csv_column_sum(result["csv"], "bonus_paid_ct")
         print(f"  {result['run_id']:<32} "
               f"slots={checks['n_slots']:<4} "
               f"ratio_span={checks['ratio_span']:<10} "
               f"pairs_posted={posted:<10.0f} "
               f"penalty_pool_ct={pool:<12.3f} "
+              f"shortfall_penalty_ct={shortfall:<12.3f} "
               f"bonus_paid_ct={bonus:<10.3f} "
               f"{checks['round_type_census']}")
 
 
 def parse_block(argv) -> object:
-    """`--block 1`, `--block 2`, `--calibration`, default all."""
+    """`--block 1`, `--block 2`, `--block sweep`, `--calibration`, default
+    all."""
     if "--calibration" in argv:
         return "calibration"
     if "--block" in argv:
         value = argv[argv.index("--block") + 1]
-        if value == "calibration":
-            return "calibration"
+        if value in ("calibration", "sweep"):
+            return value
         if value not in ("1", "2"):
-            raise SystemExit(f"--block takes 1, 2 or calibration, not {value!r}")
+            raise SystemExit(f"--block takes 1, 2, sweep or calibration, "
+                             f"not {value!r}")
         return int(value)
     return None
 
@@ -720,7 +825,7 @@ async def main(block=None, out_dir=None):
     if "--resume" in sys.argv:
         specs = resume(specs, out_dir)
     n_cells = len({spec.cell for spec in specs})
-    name = {1: "block 1", 2: "block 2",
+    name = {1: "block 1", 2: "block 2", "sweep": "the gamma/eta sweep",
             "calibration": "calibration"}.get(block, "all blocks")
     print(f"campaign ({name}): {len(specs)} runs over {n_cells} cells, "
           f"one process each")

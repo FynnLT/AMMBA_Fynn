@@ -1,6 +1,6 @@
 """Block 2: who deviates, by how much, and through which channel (D-72).
 
-Three facts about the artifact fix the whole design, and every one of them is
+Four facts about the artifact fix the whole design, and every one of them is
 read off the execution node rather than assumed:
 
 1. **A withholder is invisible from meter data** (issue #13,
@@ -24,7 +24,17 @@ read off the execution node rather than assumed:
    is not penalised, which is a result and not a defect -- nothing here
    filters on the round type.
 
-The accidental layer sits under all three arms: every allocated area delivers
+4. **`gamma` prices a channel none of the first three arms reaches**
+   (D-26): it appears at exactly one place in the artifact,
+   `k_sho = gamma * k_upper` (`penalties.py:41`), inside the seller
+   shortfall term `Phi = K_sho * max(0, traded - delivered - eta)`. It
+   enters neither externality. A withholder's meter reads exactly what it
+   traded -- that is fact 1 -- so the shortfall is identically zero in
+   `SELLER_ARM` and `gamma` multiplies a zero in all of block 2. The arm
+   that makes it observable is `SELLER_SHORTFALL_ARM`, and it is the one
+   arm that under-delivers on the meter.
+
+The accidental layer sits under all four arms: every allocated area delivers
 `allocated * (1 + eps)`, `eps ~ N(0, sigma)`. **[D-80]** sigma = 0.05 against
 `eta_relative = 0.10`, so roughly 95 % of accidental deviations fall inside
 the deadband -- "noise floor two sigma below the deadband", chosen and stated
@@ -36,8 +46,9 @@ from dataclasses import dataclass, field
 
 NONE = "none"
 SELLER_ARM = "sellers_withhold"
+SELLER_SHORTFALL_ARM = "sellers_underdeliver"
 BUYER_ARM = "buyers_underreport"
-ARMS = (NONE, SELLER_ARM, BUYER_ARM)
+ARMS = (NONE, SELLER_ARM, SELLER_SHORTFALL_ARM, BUYER_ARM)
 
 #: D-80. The accidental noise floor, two sigma below `eta_relative = 0.10`.
 DEFAULT_SIGMA = 0.05
@@ -155,7 +166,7 @@ def apply(plan: DeviationPlan, clearing: dict, slot: int) -> tuple:
     posted nothing would be measuring that fallback instead of the mechanism.
     The write path is exercised in every arm, at every sigma.
 
-    The two named arms:
+    The three named arms:
 
     * `sellers_withhold` -- the named seller's **forecast** is
       `allocated * (1 + share)`: it could have delivered that much and
@@ -164,6 +175,18 @@ def apply(plan: DeviationPlan, clearing: dict, slot: int) -> tuple:
       issue #13: the withholding is invisible on the meter and visible only
       on the forecast channel. Noise is off for the named seller -- the
       strategy is the signal.
+    * `sellers_underdeliver` -- the named seller's **meter** reads
+      `allocated * (1 - share)` against an honest **forecast** of
+      `allocated`: it sold what it could have delivered and then did not
+      deliver it. With `forecast == traded` the seller externality is silent
+      (`W_sell = max(0, traded - traded - eta) = 0`) and the shortfall term
+      acts alone, so this arm isolates the channel `gamma` prices -- per
+      deviating slot `shortfall = q * (share - eta_relative)` and
+      `Phi = gamma * K_upper * q * (share - eta_relative)`. `share` keeps
+      the meaning it has in `sellers_withhold`: the fraction of the
+      allocation the seller does not put on the wire. It is not clamped at
+      the deadband, because the deadband is the mechanism's and not the
+      harness's. Noise off for the named seller, as above.
     * `buyers_underreport` -- the named buyer's **meter** reads
       `requested * (1 + share)` against a bid of `requested`, so
       `W_buy = share * requested`. No forecast, on either side.
@@ -188,6 +211,14 @@ def apply(plan: DeviationPlan, clearing: dict, slot: int) -> tuple:
             # withholding (issue #13).
             measurements[area] = round(allocated, 6)
             forecasts[area] = round(allocated * (1.0 + plan.share), 6)
+            continue
+        if plan.arm == SELLER_SHORTFALL_ARM and area in named:
+            # The other half of the seller's strategy space, and the only arm
+            # `gamma` is visible in. The forecast is the honest deliverable --
+            # unchanged from the non-deviating path below -- so `W_sell` is
+            # zero and the shortfall term is what fires. Noise off, as above.
+            measurements[area] = round(allocated * (1.0 - plan.share), 6)
+            forecasts[area] = round(allocated, 6)
             continue
         measurements[area] = round(
             max(0.0, allocated * (1.0 + _noise(rng, plan.sigma))), 6)

@@ -264,6 +264,9 @@ def _execution(**over):
         "round_type": aggregates.SUPPLY_LIMITED,
         "clearing_price_ct_per_kwh": 15.0,
         "total_penalties_ct": 9.5,
+        "penalty_params": {"gamma": 1.5, "eta_kwh": 0.5,
+                           "eta_relative": 0.10, "eta_mode": "relative",
+                           "k_sho_ct_per_kwh": 60.0},
         "redistribution": {
             "rule": "proportional", "computed_only": True,
             "harmed_side": "buyer", "harmed_side_kwh": 10.0,
@@ -320,6 +323,71 @@ def test_the_execution_block_round_trips_field_by_field():
     # services compute it from the same totals, and a merged column would
     # hide a disagreement rather than show it.
     assert "round_type" not in row
+
+
+def test_the_penalty_parameters_the_run_used_reach_disk():
+    """D-26. `gamma: None` in a spec means "whatever the execution node's
+    configuration held that day", so a sweep CSV that does not carry its own
+    gamma cannot be read without its manifest -- Finding C in a second place.
+
+    Copied under the response's own names, `_eff` where `RunSpec` carries a
+    field of the same name: the spec is what was asked for and this is what
+    applied, and a column that merged them would hide the difference.
+    """
+    row = aggregates.slot_row({**_record(preferences=_preferences_block()),
+                               "execution": _execution()})
+
+    assert row["gamma_eff"] == 1.5
+    assert row["eta_relative_eff"] == 0.10
+    assert row["eta_mode"] == "relative"
+    # The node's own gamma * k_upper, not recomputed here: this is the column
+    # the gamma axis of 5.3 is read from.
+    assert row["k_sho_ct_per_kwh"] == 60.0
+
+    # All four are in the written header, in the execution block.
+    for field in ("gamma_eff", "eta_relative_eff", "eta_mode",
+                  "k_sho_ct_per_kwh"):
+        assert field in aggregates.EXECUTION_FIELDS
+        assert field in aggregates.FIELDS
+
+    # And they follow the response rather than a constant: a second run at a
+    # different gamma writes a different pair.
+    other = aggregates.slot_row(
+        {**_record(preferences=_preferences_block()),
+         "execution": _execution(penalty_params={
+             "gamma": 3.0, "eta_kwh": 0.5, "eta_relative": 0.25,
+             "eta_mode": "relative", "k_sho_ct_per_kwh": 120.0})})
+    assert (other["gamma_eff"], other["k_sho_ct_per_kwh"]) == (3.0, 120.0)
+    assert other["eta_relative_eff"] == 0.25
+
+
+def test_the_penalty_parameters_are_a_gap_on_a_slot_that_did_not_execute():
+    """A slot that did not execute has no parameters to report, and neither
+    does one the node answered `no_trades` for. None, not the configured
+    value: the column states what applied, and nothing applied."""
+    for execution in (None, {"status": "no_trades", "results": []}):
+        row = aggregates.slot_row(
+            {**_record(preferences=_preferences_block()),
+             "execution": execution})
+        for field in ("gamma_eff", "eta_relative_eff", "eta_mode",
+                      "k_sho_ct_per_kwh"):
+            assert row[field] is None, (field, execution)
+
+    # An executed response that carries no `penalty_params` at all is the
+    # same gap, and it leaves every other execution field untouched.
+    without = _execution()
+    without.pop("penalty_params")
+    row = aggregates.slot_row({**_record(preferences=_preferences_block()),
+                               "execution": without})
+    full = aggregates.slot_row({**_record(preferences=_preferences_block()),
+                                "execution": _execution()})
+    for field in ("gamma_eff", "eta_relative_eff", "eta_mode",
+                  "k_sho_ct_per_kwh"):
+        assert row[field] is None, field
+    for field in aggregates.EXECUTION_FIELDS:
+        if field.endswith("_eff") or field in ("eta_mode", "k_sho_ct_per_kwh"):
+            continue
+        assert row[field] == full[field], field
 
 
 def test_a_record_without_an_execution_block_yields_none_in_every_field():

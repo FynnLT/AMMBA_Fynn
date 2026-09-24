@@ -463,7 +463,7 @@ def block1_grid() -> dict:
         prefix = ("prefs_first" if order == "preferences_first"
                   else "pro_rata_first")
         for density in DENSITIES:
-            grid[f"{prefix}_d{pct(density * 100):03d}"] = {
+            grid[f"{prefix}_d{pct(density):03d}"] = {
                 "preferences": prefs(order=order, multipliers_enabled=False),
                 "named_share": density, "mutual_share": REFERENCE_MUTUAL}
 
@@ -471,7 +471,7 @@ def block1_grid() -> dict:
     # mutual nomination gets priority, so this is the parameter that decides
     # how much of the named volume the mechanism can act on at all.
     for mutual in MUTUAL_SENSITIVITY:
-        grid[f"prefs_first_d050_m{pct(mutual * 100):03d}"] = {
+        grid[f"prefs_first_d050_m{pct(mutual):03d}"] = {
             "preferences": prefs(order="preferences_first",
                                  multipliers_enabled=False),
             "named_share": 0.50, "mutual_share": mutual}
@@ -515,7 +515,7 @@ def block1_grid() -> dict:
     # table that puts its per-slot means next to the other cells is comparing
     # different numbers of slots and has to say so.
     grid.update({
-        f"green_share_{pct(share * 100):03d}": {
+        f"green_share_{pct(share):03d}": {
             "preferences": BASELINE_PREFERENCES, "participation": share}
         for share in GREEN_SHARES})
     return grid
@@ -567,7 +567,7 @@ def block2_grid() -> dict:
                         (deviations.BUYER_ARM, "b2_buy")):
         # How hard one deviator deviates.
         for share in DEVIATION_SHARES:
-            grid[f"{prefix}_s{pct(share * 100):02d}"] = cell(arm, share, 1)
+            grid[f"{prefix}_s{pct(share):02d}"] = cell(arm, share, 1)
         # How many deviate, at the reference share.
         for k in COALITION_SIZES:
             grid[f"{prefix}_k{k:02d}"] = cell(arm, REFERENCE_SHARE, k)
@@ -625,11 +625,11 @@ def sweep_grid() -> dict:
                 "deviation": {"arm": arm, "share": share, "k": 1,
                               "sigma": SIGMA, "seed": DEVIATION_SEED}}
 
-    grid = {f"b2_eta{pct(eta * 100):03d}":
+    grid = {f"b2_eta{pct(eta):03d}":
             cell(deviations.SELLER_ARM, REFERENCE_SHARE, eta_relative=eta)
             for eta in SWEEP_ETAS}
     grid.update({
-        f"b2_short_g{pct(g * 100):03d}":
+        f"b2_short_g{pct(g):03d}":
         cell(deviations.SELLER_SHORTFALL_ARM, REFERENCE_SHARE,
              eta_relative=ETA_RELATIVE, gamma=g)
         for g in SWEEP_GAMMAS})
@@ -642,7 +642,7 @@ def sweep_grid() -> dict:
         if g == gamma:
             # The default gamma at the reference eta *is* `b2_sell_s25`.
             continue
-        grid[f"b2_sell_s25_g{pct(g * 100):03d}"] = cell(
+        grid[f"b2_sell_s25_g{pct(g):03d}"] = cell(
             deviations.SELLER_ARM, REFERENCE_SHARE,
             eta_relative=ETA_RELATIVE, gamma=g)
     grid["b2_sell_s20"] = cell(deviations.SELLER_ARM, 0.20,

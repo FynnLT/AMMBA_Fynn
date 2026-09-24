@@ -77,6 +77,33 @@ importable.
 runs: two ways of setting the same thing is how a manifest stops describing the
 run it names.
 
+### N-curve
+
+```bash
+cd evaluation/harness
+python ncurve.py                                    # the default points, 5 .. 100 000
+python ncurve.py --points 5,10,20,50,100 --repeats 1
+```
+
+`ncurve.py` measures the off-chain clearing cycle against the number of orders
+in a slot (one order per area, so N orders is N market areas) and writes one
+row per slot to `out/ncurve/ncurve.csv`; it refuses to start into a directory
+that already holds a `manifest.json` rather than appending to it. Each row
+carries three times: `t_setup_s` is `POST /market` plus
+`POST /orders-normalized` and is **excluded** from the cycle figure,
+`t_clear_s` is `st.clear(trigger)` end to end and **is** the cycle, and
+`t_store_in_clear_s` is how much of that cycle was spent in off-chain store
+calls — accumulated by `stack.TimedTransport`, which both DB clients and the
+clearing node's own queries share, so the split says which component a point's
+time is actually in. If `t_clear_s` ever exceeds the 900 s slot the point is
+recorded, the curve stops and no larger N is run; the script still exits 0,
+because a stopping rule that fails the run loses the points already measured.
+The curve is measured **in process** — no network, no uvicorn, no real chain —
+and is therefore reported as a complexity statement (the off-chain cycle grows
+with N, `clearMarket` does not) and never as a capacity: nothing here fits a
+line, extrapolates a saturation point or converts a time into a participant
+count.
+
 ## Where output lands
 
 Everything goes to `evaluation/out/`, one subdirectory per run, and `out/` is
@@ -86,6 +113,8 @@ git-ignored: results are not part of the artifact either.
 out/<run_id>/<run_id>_slots.csv    one row per slot
 out/<run_id>/manifest.json         one provenance entry per run
 out/figures/                       figures from plots.py
+out/ncurve/                        the N-curve: one CSV row per slot,
+                                   one manifest per invocation
 ```
 
 **Everything the thesis cites comes out of `out/` and is identified by the

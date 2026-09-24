@@ -567,7 +567,7 @@ def block2_grid() -> dict:
 
 
 def sweep_grid() -> dict:
-    """The (gamma, eta) sweep: 10 cells, block 2's reference configuration
+    """The (gamma, eta) sweep: 12 cells, block 2's reference configuration
     with exactly one parameter moved (D-26, B-10).
 
     Every cell runs at `BASELINE_PREFERENCES`, `execute = True`, the campaign
@@ -580,7 +580,7 @@ def sweep_grid() -> dict:
     re-running it would append a second entry to a manifest the 17./18.09.
     campaign is written against.
 
-    Three groups, and none of them is a duplicate of another:
+    Four groups, and none of them is a duplicate of another:
 
     * `b2_eta*` -- the eta axis on the withholding arm, where eta is the
       deadband of `W_sell` and extinguishes the deviation exactly at
@@ -592,11 +592,22 @@ def sweep_grid() -> dict:
       four cells share an arm, a share and a deviation seed, so the
       deviator's measurements are identical across them and the four
       `shortfall_penalty_ct` values stand in the exact ratio of the gammas.
-    * the two controls. `b2_sell_s25_g300` is `b2_sell_s25` at gamma 3.0 and
-      is **expected to be identical to it in every penalty column** -- that
-      is the point, it is the measured demonstration that gamma does not
-      touch withholding. `b2_sell_s20` fills the gap in block 2's share axis,
-      so the eta axis has a `share - eta` neighbour on the other side.
+    * `b2_sell_s25_g*` -- the same gamma axis **on the withholding arm**, at
+      the three non-default gammas of `SWEEP_GAMMAS` (`b2_sell_s25` is its
+      first point). The contrast against `b2_short_g*` is the point of the
+      group: the deviator withholds and delivers exactly what it traded, so
+      its own penalty is untouched by gamma at every one of these four
+      points, while the honest sellers around it carry delivery noise that
+      the shortfall term *does* scale with gamma. One cell would show the
+      deviator unmoved; three show that the rest of the community is not,
+      and that the two effects are separable.
+
+      Table 5.7 reported four gammas on this arm and measured two of them,
+      the other two following from the exact linearity of `Phi`. The
+      linearity is an argument and belongs in the text; a derived number in
+      a results table reads as data, so all four are now run.
+    * one control. `b2_sell_s20` fills the gap in block 2's share axis, so
+      the eta axis has a `share - eta` neighbour on the other side.
     """
     gamma = execution_gamma()
 
@@ -614,9 +625,18 @@ def sweep_grid() -> dict:
         cell(deviations.SELLER_SHORTFALL_ARM, REFERENCE_SHARE,
              eta_relative=ETA_RELATIVE, gamma=g)
         for g in SWEEP_GAMMAS})
-    # The two controls, both at the reference eta.
-    grid["b2_sell_s25_g300"] = cell(deviations.SELLER_ARM, REFERENCE_SHARE,
-                                    eta_relative=ETA_RELATIVE, gamma=3.0)
+    # The controls, all at the reference eta. The gamma list is read off
+    # `SWEEP_GAMMAS` and the default is taken out by comparing against
+    # `execution_gamma()` rather than by restating it as 1.1: "the configured
+    # value" is a fact about the service, and a cell that restated it would
+    # keep its name after the node was re-configured.
+    for g in SWEEP_GAMMAS:
+        if g == gamma:
+            # The default gamma at the reference eta *is* `b2_sell_s25`.
+            continue
+        grid[f"b2_sell_s25_g{int(g * 100):03d}"] = cell(
+            deviations.SELLER_ARM, REFERENCE_SHARE,
+            eta_relative=ETA_RELATIVE, gamma=g)
     grid["b2_sell_s20"] = cell(deviations.SELLER_ARM, 0.20,
                                eta_relative=ETA_RELATIVE)
     return grid

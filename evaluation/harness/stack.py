@@ -14,7 +14,7 @@ The pilot's `db._client = ...` monkey-patch is therefore no longer needed.
 clone sit side by side, so the harness is path-portable (the pilot ran on
 Linux with a hard-coded /tmp path; this runs on Windows).
 """
-import asyncio, importlib, sys, os, copy
+import asyncio, importlib, sys, os, copy, time
 from dataclasses import replace
 from pathlib import Path
 
@@ -57,11 +57,43 @@ EXE  = _load(str(REPO / "amm-execution-node"),
 import httpx
 
 
+class TimedTransport(httpx.AsyncBaseTransport):
+    """Counts requests and wall time through the mock DB.
+
+    The two DB clients and the clearing node's own queries share this one
+    transport, so its totals are every off-chain store call a slot makes --
+    which is what D-86 needs to state which component an N-point's time is
+    in. Not a profiler: it measures the transport boundary, nothing inside
+    the services.
+    """
+
+    def __init__(self, inner):
+        self._inner, self.n_requests, self.elapsed = inner, 0, 0.0
+
+    async def handle_async_request(self, request):
+        started = time.perf_counter()
+        try:
+            return await self._inner.handle_async_request(request)
+        finally:
+            self.elapsed += time.perf_counter() - started
+            self.n_requests += 1
+
+    def reset(self):
+        self.n_requests, self.elapsed = 0, 0.0
+
+
 class Stack:
     def __init__(self):
         self.app = MOCK["main"].create_app()
+        # Wrapped, not replaced: every existing call site goes through the
+        # same ASGI transport it always did, and the wrapper only records
+        # that it passed. `Stack.reset()` deliberately leaves the counters
+        # alone -- a caller that is timing a section resets them around that
+        # section, and a reset hidden inside another method is how a
+        # measurement quietly starts including its own setup.
+        self.transport = TimedTransport(httpx.ASGITransport(app=self.app))
         self.http = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=self.app),
+            transport=self.transport,
             base_url="http://mockdb", timeout=30)
         # Real dependency injection: the client is owned by this Stack and
         # closed in `close()`, not by either DB client.

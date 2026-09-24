@@ -49,7 +49,7 @@ def test_five_seeds_per_cell_recorded_individually():
     assert not {s.cell for s in block1} & {s.cell for s in block2}
     assert not {s.cell for s in sweep} & ({s.cell for s in block1}
                                           | {s.cell for s in block2})
-    assert len(campaign.cells()) == 95 + 70 + 50 + 6
+    assert len(campaign.cells()) == 95 + 70 + 60 + 6
 
 
 def test_block_two_executes_and_block_one_does_not():
@@ -135,27 +135,28 @@ def test_the_two_noise_references_differ_only_in_sigma():
 
 # ------------------------------------------------- the gamma/eta sweep
 
-def test_the_sweep_is_ten_cells_at_five_seeds():
+def test_the_sweep_is_twelve_cells_at_five_seeds():
     """D-26/B-10. The parameter axis block 2 does not carry: all 70 of its
     runs sat at one point of the (gamma, eta) plane."""
     specs = campaign.cells("sweep")
     # Written out rather than derived from the grid under test, as above: a
     # count computed from `sweep_grid()` itself cannot notice it losing a
-    # cell. Four eta points, four gamma points, two controls -- 10 cells,
-    # 50 runs.
-    assert len(specs) == 50
+    # cell. Four eta points, four gamma points on the shortfall arm, three on
+    # the withholding arm, one share control -- 12 cells, 60 runs.
+    assert len(specs) == 60
 
     by_cell = {}
     for spec in specs:
         by_cell.setdefault(spec.cell, []).append(spec.seed)
-    assert len(by_cell) == 10
+    assert len(by_cell) == 12
     assert sorted(by_cell) == [
         "b2_eta000", "b2_eta005", "b2_eta015", "b2_eta025",
-        "b2_sell_s20", "b2_sell_s25_g300",
+        "b2_sell_s20",
+        "b2_sell_s25_g150", "b2_sell_s25_g200", "b2_sell_s25_g300",
         "b2_short_g110", "b2_short_g150", "b2_short_g200", "b2_short_g300"]
     for cell, seeds in by_cell.items():
         assert seeds == list(campaign.SEEDS), cell
-    assert len({s.run_id for s in specs}) == 50
+    assert len({s.run_id for s in specs}) == 60
 
     assert campaign.parse_block(["campaign.py", "--block", "sweep"]) == "sweep"
     # And the reference point is deliberately absent: `b2_sell_s25` at
@@ -209,11 +210,11 @@ def test_each_sweep_axis_varies_exactly_one_parameter():
     assert {c.eta_relative for c in gamma_cells} == {campaign.ETA_RELATIVE}
 
 
-def test_the_two_sweep_controls_move_one_thing_off_the_block_two_cell():
-    """`b2_sell_s25_g300` is the measured demonstration that gamma does not
-    touch withholding: it is `b2_sell_s25` at gamma 3.0 and is expected to be
-    identical to it in every penalty column. `b2_sell_s20` fills the gap in
-    block 2's share axis at the reference eta."""
+def test_the_sweep_controls_move_one_thing_off_the_block_two_cell():
+    """`b2_sell_s25_g300` is the far end of the measured demonstration that
+    gamma does not touch withholding: it is `b2_sell_s25` at gamma 3.0 and is
+    expected to be identical to it in every penalty column. `b2_sell_s20`
+    fills the gap in block 2's share axis at the reference eta."""
     reference = next(s for s in campaign.cells(2)
                      if s.cell == "b2_sell_s25" and s.seed == 0)
     by_cell = {s.cell: s for s in campaign.cells("sweep") if s.seed == 0}
@@ -236,6 +237,61 @@ def test_the_two_sweep_controls_move_one_thing_off_the_block_two_cell():
         without(reference, "deviation")
     assert {k: v for k, v in at_share_twenty.deviation.items() if k != "share"} \
         == {k: v for k, v in reference.deviation.items() if k != "share"}
+
+
+def test_the_withholding_gamma_group_is_three_cells_differing_only_in_gamma():
+    """Table 5.7 reports the honest-seller shortfall at four gammas on the
+    withholding arm and only two of them were run; 1.5 and 2.0 were derived
+    from the exact linearity of `Phi`. A derived value in a results table
+    reads as data, so the group is now measured end to end.
+
+    The three cells here plus `b2_sell_s25` are those four points. They share
+    an arm, a share, an eta, a deviation seed and a sigma, so the only thing
+    that moves along the group is gamma.
+    """
+    grid = campaign.sweep_grid()
+    assert len(grid) == 12
+
+    names = ["b2_sell_s25_g150", "b2_sell_s25_g200", "b2_sell_s25_g300"]
+    assert set(names) <= set(grid)
+
+    # The gammas are the non-default points of `SWEEP_GAMMAS`, read off the
+    # axis rather than restated: "default" is `execution_gamma()`, and the
+    # default point at the reference eta *is* `b2_sell_s25`.
+    default = campaign.execution_gamma()
+    expected = [g for g in campaign.SWEEP_GAMMAS if g != default]
+    assert expected == [1.5, 2.0, 3.0]
+    assert [grid[n]["gamma"] for n in names] == expected
+
+    for name in names:
+        cell = grid[name]
+        assert cell["deviation"]["arm"] == campaign.deviations.SELLER_ARM
+        assert cell["deviation"]["share"] == campaign.REFERENCE_SHARE
+        assert cell["eta_relative"] == campaign.ETA_RELATIVE
+
+    def without_gamma(cell):
+        return json.dumps({k: v for k, v in cell.items() if k != "gamma"},
+                          sort_keys=True)
+
+    assert len({without_gamma(grid[n]) for n in names}) == 1
+
+
+def test_no_sweep_cell_that_already_has_runs_lost_its_name():
+    """The ten cells of the 18.09. sweep have manifests under `out/` and 5.3
+    is written against them. A renamed cell would orphan those runs and
+    `--resume` would re-run it, so the old names are asserted explicitly
+    rather than as a count -- a count cannot tell a rename from an addition.
+    """
+    grid = campaign.sweep_grid()
+    already_run = [
+        "b2_eta000", "b2_eta005", "b2_eta015", "b2_eta025",
+        "b2_sell_s20", "b2_sell_s25_g300",
+        "b2_short_g110", "b2_short_g150", "b2_short_g200", "b2_short_g300"]
+    missing = sorted(set(already_run) - set(grid))
+    assert not missing, missing
+    # And the only names that are new are the two this task adds.
+    assert sorted(set(grid) - set(already_run)) == ["b2_sell_s25_g150",
+                                                    "b2_sell_s25_g200"]
 
 
 def test_the_density_cells_differ_in_nothing_but_the_two_shares():

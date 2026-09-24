@@ -7,5 +7,6 @@
 # those from the service directories.
 openpyxl>=3.1,<4        # reads data/raw/*.xlsx, read-only
 matplotlib>=3.7,<4      # plots.py
+numpy>=1.24             # analysis/ (DR2-DR5); matplotlib pulls it in anyway
 pytest>=8
 anyio>=4                # async tests, same idiom as the services

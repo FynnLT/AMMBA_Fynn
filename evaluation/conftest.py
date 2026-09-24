@@ -9,6 +9,8 @@ which would change every existing call site for no gain.
 
 `calibration/` is added when it exists: it arrives with T-19, after the
 harness sections, and a missing directory must not break the harness tests.
+`analysis/` holds the DR2-DR5 analysis over recorded runs, imported flatly
+the same way.
 """
 import sys
 from pathlib import Path
@@ -17,7 +19,7 @@ import pytest
 
 EVALUATION_DIR = Path(__file__).resolve().parent
 
-for name in ("harness", "calibration"):
+for name in ("harness", "calibration", "analysis"):
     directory = EVALUATION_DIR / name
     if directory.is_dir():
         path = str(directory)

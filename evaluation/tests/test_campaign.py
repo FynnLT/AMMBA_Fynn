@@ -84,7 +84,7 @@ def test_the_deviation_axes_each_vary_one_thing():
 
     for arm, prefix in (("sellers_withhold", "b2_sell"),
                         ("buyers_underreport", "b2_buy")):
-        shares = [by_cell[f"{prefix}_s{int(s * 100):02d}"]
+        shares = [by_cell[f"{prefix}_s{campaign.pct(s * 100):02d}"]
                   for s in campaign.DEVIATION_SHARES]
         assert [s.deviation["share"] for s in shares] == \
             list(campaign.DEVIATION_SHARES)
@@ -194,7 +194,7 @@ def test_each_sweep_axis_varies_exactly_one_parameter():
 
     # The eta axis: `eta_relative` moves, on the withholding arm, at the
     # configured gamma. Nothing else.
-    eta_cells = [by_cell[f"b2_eta{int(e * 100):03d}"] for e in campaign.SWEEP_ETAS]
+    eta_cells = [by_cell[f"b2_eta{campaign.pct(e * 100):03d}"] for e in campaign.SWEEP_ETAS]
     assert [c.eta_relative for c in eta_cells] == list(campaign.SWEEP_ETAS)
     assert len({without(c, "eta_relative") for c in eta_cells}) == 1
     assert {c.deviation["arm"] for c in eta_cells} == {"sellers_withhold"}
@@ -202,7 +202,7 @@ def test_each_sweep_axis_varies_exactly_one_parameter():
 
     # The gamma axis: `gamma` moves, on the under-delivery arm, which is the
     # only arm the shortfall term -- and therefore gamma -- is visible in.
-    gamma_cells = [by_cell[f"b2_short_g{int(g * 100):03d}"]
+    gamma_cells = [by_cell[f"b2_short_g{campaign.pct(g * 100):03d}"]
                    for g in campaign.SWEEP_GAMMAS]
     assert [c.gamma for c in gamma_cells] == list(campaign.SWEEP_GAMMAS)
     assert len({without(c, "gamma") for c in gamma_cells}) == 1
@@ -317,7 +317,7 @@ def test_the_density_cells_differ_in_nothing_but_the_two_shares():
 
     # Same three densities on both orders, at the reference reciprocity.
     for prefix in ("prefs_first", "pro_rata_first"):
-        cells = [by_cell[f"{prefix}_d{int(d * 100):03d}"][0]
+        cells = [by_cell[f"{prefix}_d{campaign.pct(d * 100):03d}"][0]
                  for d in campaign.DENSITIES]
         assert [c.named_share for c in cells] == list(campaign.DENSITIES)
         assert {c.mutual_share for c in cells} == {campaign.REFERENCE_MUTUAL}
@@ -331,7 +331,7 @@ def test_the_density_cells_differ_in_nothing_but_the_two_shares():
         {k: v for k, v in right.items() if k != "order"}
 
     # The reciprocity sensitivity moves `mutual_share` at the same density.
-    sensitivity = [by_cell[f"prefs_first_d050_m{int(m * 100):03d}"][0]
+    sensitivity = [by_cell[f"prefs_first_d050_m{campaign.pct(m * 100):03d}"][0]
                    for m in campaign.MUTUAL_SENSITIVITY]
     assert [s.mutual_share for s in sensitivity] == \
         list(campaign.MUTUAL_SENSITIVITY)
@@ -582,3 +582,9 @@ def test_parallel_and_sequential_produce_identical_results(tmp_path):
             entry.pop("wall_sec")
             entry["config"].pop("out_dir")
         assert a == b
+
+
+def test_cell_names_survive_float_error():
+    assert campaign.pct(2.3) == 230
+    assert campaign.pct(0.29) == 29
+    assert campaign.pct(2.01) != campaign.pct(2.0)

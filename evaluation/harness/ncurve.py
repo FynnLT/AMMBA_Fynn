@@ -84,7 +84,7 @@ REPEATS = 3
 # 1e5 orders is setup time spent to sharpen a median that the curve does not
 # turn on. The CSV records how many were actually run.
 BIG_N = 10_000
-BIG_N_REPEATS = 1
+BIG_N_REPEATS = 2
 
 COMMUNITY = "ncurve"
 COMMUNITY_NAME = "N-curve"

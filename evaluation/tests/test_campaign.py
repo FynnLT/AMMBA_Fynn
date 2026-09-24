@@ -462,6 +462,48 @@ def test_the_out_argument_redirects_every_run(tmp_path):
     assert campaign.redirect(specs, None) is specs
 
 
+def test_resume_returns_exactly_the_aborted_run(tmp_path, capsys):
+    """The manifest is written last, so a directory without one is a run
+    that did not finish -- even when its CSV is already there."""
+    specs = [campaign.spec_for("resume", seed) for seed in (0, 1, 2)]
+    done_a, aborted, done_b = specs
+    for spec in (done_a, done_b):
+        directory = tmp_path / spec.run_id
+        directory.mkdir()
+        (directory / f"{spec.run_id}_slots.csv").write_text(
+            "slot\n", encoding="utf-8")
+        (directory / "manifest.json").write_text("[]", encoding="utf-8")
+    directory = tmp_path / aborted.run_id
+    directory.mkdir()
+    (directory / f"{aborted.run_id}_slots.csv").write_text(
+        "slot\n", encoding="utf-8")
+
+    assert campaign.resume(specs, tmp_path) == [aborted]
+    assert "2 runs already complete, 1 to run" in capsys.readouterr().out
+
+
+def test_the_pilot_lives_in_its_own_module_and_the_import_goes_one_way():
+    """Two manifest conventions, two modules: `campaign` writes one manifest
+    per run through `runs.write_manifest`, the pilot appends to
+    `out/manifest.json`. `pilot` may import from `campaign`, never back."""
+    source = (HARNESS / "campaign.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported = ({alias.name for node in ast.walk(tree)
+                 if isinstance(node, ast.Import) for alias in node.names}
+                | {node.module for node in ast.walk(tree)
+                   if isinstance(node, ast.ImportFrom)})
+    assert "pilot" not in imported
+    assert "--pilot" not in source
+
+    import pilot
+    for name in ("pilot_main", "block_golden", "block_sd_sweep",
+                 "block_pairs", "block_multipliers", "write",
+                 "write_manifest"):
+        assert callable(getattr(pilot, name)), name
+        assert not hasattr(campaign, name), name
+    assert pilot.MANIFEST == campaign.OUT / "manifest.json"
+
+
 def test_the_green_share_axis_varies_participation_and_nothing_else():
     """D-76. The axis is only an axis if one thing moves along it.
 

@@ -30,6 +30,17 @@ def test_run_slot_requires_community_and_slot():
     assert not hasattr(runner, "_slot_counter")
 
 
+def test_the_stack_sigmoid_requires_the_band():
+    """Its defaults were the pre-calibration band; a call that forgets the
+    band now fails instead of being priced at 28.5 / 2.5."""
+    with pytest.raises(TypeError):
+        stack.sigmoid_price(1.25)
+    with pytest.raises(TypeError):
+        stack.sigmoid_price(1.25, 40.0, 8.0, 1.0, 0.6)
+    assert stack.sigmoid_price(1.0, **runner.SIGMOID) == pytest.approx(
+        (runner.SIGMOID["k_upper"] + runner.SIGMOID["k_lower"]) / 2)
+
+
 def test_market_id_is_namespaced_by_community():
     """`query_orders` filters on market_id and the time window, not on the
     community -- two communities in one slot would share an order book."""

@@ -156,7 +156,13 @@ class Stack:
         return await EXE["execution"].run_execution(trigger, cfg, self.db_exe)
 
 
-def sigmoid_price(ratio, k_upper=28.5, k_lower=8.0, theta=1.0, steepness=2.5):
+def sigmoid_price(ratio, *, k_upper, k_lower, theta, steepness):
+    """The clearing node's sigmoid, with the band required.
+
+    No defaults: they used to be the pre-calibration band (28.5 / 8.0 / 1.0 /
+    2.5), and a caller that forgot the band would have been priced at it
+    without a word.
+    """
     return CLR["sigmoid"].sigmoid_price(ratio, k_upper, k_lower, theta, steepness)
 
 penalties = EXE["penalties"]

@@ -58,8 +58,13 @@ actually reached a figure; do not weaken them.
 ```bash
 cd evaluation/harness
 python campaign.py            # the profile campaign: 4 cells x 5 seeds
-python campaign.py --pilot    # the 02.09. synthetic blocks, which plots.py reads
+python pilot.py               # the 02.09. synthetic blocks, which plots.py reads
 ```
+
+The pilot lives in its own module because it has its own manifest
+convention: it appends to `out/manifest.json`, while a campaign run writes one
+manifest per run directory through `runs.write_manifest`. `pilot.py` imports
+what the two share from `campaign`; `campaign` does not import `pilot`.
 
 A campaign runs one process per run (`multiprocessing`, **spawn**), each worker
 building its own `Stack` and therefore its own empty store. That is what makes

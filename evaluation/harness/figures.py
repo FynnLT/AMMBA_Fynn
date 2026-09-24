@@ -1,16 +1,22 @@
-"""Chapter 5 figures, built from the campaign runs under `evaluation/out`.
+"""Chapter 5 figures, built from the runs and measurements under `evaluation/out`.
 
 `plots.py` is the pilot's figure script: it reads the four synthetic campaign
 CSVs of 02.09. and is left untouched, because none of its figures is reported
-as a result (Chapter 5.1.5). This module reads the per-run directories of the
-17.-18.09. campaign instead -- one manifest, one slot CSV and one area CSV per
-run, five runs per cell, 43 cells.
+as a result (Chapter 5.1.5). This module reads three kinds of source instead:
+
+* the per-run directories of the 17.-18.09. campaign -- one manifest, one slot
+  CSV and one area CSV per run, five runs per cell, 45 cells, 225 runs;
+* the DR2 curves that `evaluation/analysis/dr_analysis.py` wrote
+  (`out/analysis/<date>-<sha>/dr2_curves.csv` and `dr2_cases.csv`);
+* the two scalability measurements, the scripted gas series
+  (`out/gas-*/gas_series.csv`) and the N-curve (`out/ncurve-*/ncurve.csv`).
 
 Three rules, the same three the harness itself follows:
 
-* **Projection, never computation.** Every quantity here is a sum, a mean or a
-  count over columns the services produced. No price, penalty or balance is
-  recomputed, so a figure states what the artifact answered.
+* **Projection, never computation.** Every quantity here is a sum, a mean, a
+  median or a count over columns the services or the analysis produced. No
+  price, penalty, balance or gain is recomputed, so a figure states what the
+  artifact (or the replay with the artifact's own functions) answered.
 * **Block 2 is read from the deviator's own area rows**, never from
   `penalty_pool_ct`. That column is dominated by the buyer-side noise floor,
   against which one deviator's signal disappears; the deviator ids are in each
@@ -22,19 +28,42 @@ Three rules, the same three the harness itself follows:
 
 Colours are a validated categorical set (blue / red / purple) and every series
 also carries its own marker and line style, so the figures survive greyscale
-printing and colour-vision deficiency without relying on hue.
+printing and colour-vision deficiency without relying on hue. No figure has a
+second y-axis: two measures of different scale are two panels.
+
+Which figure is which in Chapter 5 (restructured by DR, 24.09.):
+
+    module  file                          chapter
+    1       fig1_preference_density       Figure 5.1
+    2       fig2_reciprocity              Figure 5.2
+    8       fig8_dr2_curves               Figure 5.3
+    6       fig6_deadband                 Figure 5.4
+    7       fig7_gamma                    Figure 5.5
+    3       fig3_multiplier_formulation   Figure 5.6
+    9       fig9_scalability              Figure 5.7
+    4       fig4_battery_participation    not used
+    5       fig5_deviation_axes           not used (see its docstring)
 
 Usage
 -----
-    python figures.py                 # all figures
-    python figures.py 3 5             # only figures 3 and 5
+    python figures.py                 # the seven figures of Chapter 5
+    python figures.py --all           # all nine, including the two unused
+    python figures.py 7 8 9           # only these
     python figures.py --refresh       # rebuild the cached per-run summary
     python figures.py --list          # what each figure shows
+    python figures.py 8 --analysis ../out/analysis/20260924-0e65c00
+
+`--analysis`, `--ncurve` and `--gas` pin a source directory; without them the
+newest one under `out/` is used (by the manifest's `timestamp_utc` where there
+is one, by directory name otherwise), and the directory actually read is
+printed with every figure that uses it.
 
 Figures land in `evaluation/out/figures/` as PNG at 300 dpi and as PDF. The
-per-run summary is cached beside them; delete it or pass `--refresh` after a
-new campaign run.
+per-run summary is cached beside them. Cells that appear in `out/` after the
+cache was written are summarised and added on the next call; pass `--refresh`
+when a run that is already in the cache has been re-run.
 """
+import argparse
 import csv
 import json
 import statistics
@@ -44,6 +73,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter, NullFormatter
 
 HARNESS_DIR = Path(__file__).resolve().parent
 OUT = HARNESS_DIR.parent / "out"
@@ -214,22 +244,36 @@ def summarise_run(cell, seed):
 
 
 def summary(refresh=False):
-    """Per-run summaries for every cell present in `out/`, cached as JSON."""
+    """Per-run summaries for every cell present in `out/`, cached as JSON.
+
+    The cache is extended, not trusted blindly: a cell or seed that is in
+    `out/` but not in the cache is summarised and added. A cache written
+    before the gamma cells were run would otherwise make fig7 silently drop
+    them. What the cache cannot notice is a run that was re-run in place;
+    that needs `--refresh`.
+    """
+    data = {}
     if CACHE.exists() and not refresh:
-        return json.loads(CACHE.read_text(encoding="utf-8"))
+        data = json.loads(CACHE.read_text(encoding="utf-8"))
     cells = sorted(p.name.rsplit("--seed-", 1)[0] for p in OUT.glob("*--seed-0")
                    if (p / "manifest.json").exists())
-    data = {}
+    changed = False
     for cell in cells:
-        runs = {}
-        for seed in SEEDS:
-            if (run_dir(cell, seed) / "manifest.json").exists():
-                runs[str(seed)] = summarise_run(cell, seed)
-        if runs:
-            data[cell] = runs
-        print(f"  summarised {cell} ({len(runs)} runs)")
-    FIG.mkdir(parents=True, exist_ok=True)
-    CACHE.write_text(json.dumps(data, indent=1), encoding="utf-8")
+        runs = dict(data.get(cell, {}))
+        missing = [seed for seed in SEEDS
+                   if str(seed) not in runs
+                   and (run_dir(cell, seed) / "manifest.json").exists()]
+        if not missing:
+            continue
+        for seed in missing:
+            runs[str(seed)] = summarise_run(cell, seed)
+        data[cell] = dict(sorted(runs.items()))
+        changed = True
+        print(f"  summarised {cell} ({len(missing)} new of {len(runs)} runs)")
+    if changed or not CACHE.exists():
+        FIG.mkdir(parents=True, exist_ok=True)
+        CACHE.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    print(f"  {len(data)} cells, {sum(len(r) for r in data.values())} runs")
     return data
 
 
@@ -283,6 +327,69 @@ def _bars(ax, groups, labels, values, errors, ylabel, width=0.36):
     ax.set_xticks(list(positions))
     ax.set_xticklabels(groups)
     ax.set_ylabel(ylabel)
+
+
+# ------------------------------------------------ analysis and measurements
+
+#: Source directories pinned on the command line (--analysis, --ncurve, --gas).
+PINNED = {}
+
+
+def _timestamp(directory):
+    """The manifest's `timestamp_utc`, or "" where there is no manifest."""
+    path = directory / "manifest.json"
+    if not path.exists():
+        return ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return ""
+    data = data[-1] if isinstance(data, list) else data
+    return data.get("timestamp_utc") or ""
+
+
+def _checks_passed(directory):
+    """An analysis output counts only if its R1-R3 checks passed."""
+    try:
+        data = json.loads((directory / "manifest.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return False
+    return bool(data.get("checks_passed"))
+
+
+def source(kind, pattern, filename, accept=None):
+    """The file a figure reads: pinned, or the newest match under `out/`."""
+    if kind in PINNED:
+        directory = Path(PINNED[kind]).resolve()
+    else:
+        found = [p for p in OUT.glob(pattern)
+                 if (p / filename).exists() and (accept is None or accept(p))]
+        if not found:
+            raise FileNotFoundError(f"no {filename} under out/{pattern}")
+        directory = max(found, key=lambda p: (_timestamp(p), p.name))
+    path = directory / filename
+    if not path.exists():
+        raise FileNotFoundError(str(path))
+    shown = directory.relative_to(OUT) if directory.is_relative_to(OUT) else directory
+    print(f"    {kind}: {shown}")
+    return path
+
+
+def read_rows(path):
+    """The rows of a CSV that may start with a BOM and carry `#` lines."""
+    with open(path, newline="", encoding="utf-8-sig") as handle:
+        lines = [line for line in handle
+                 if line.strip() and not line.lstrip().startswith("#")]
+    return list(csv.DictReader(lines))
+
+
+def _thousands(value, _position=None):
+    return f"{value:,.0f}"
+
+
+def _plain(value, _position=None):
+    """Tick labels on a logarithmic axis as plain numbers: 0.01 ... 100,000."""
+    return f"{value:,.0f}" if value >= 1 else f"{value:g}"
 
 
 # ----------------------------------------------------------------- figures
@@ -373,7 +480,11 @@ def fig3(data):
 
 
 def fig4(data):
-    """The declared battery rule: how much of the market rests on it."""
+    """The declared battery rule: how much of the market rests on it.
+
+    Not used in Chapter 5 (24.09.); the battery-participation cells are
+    reported in the text of Section 5.1. Built only with `--all` or `4`.
+    """
     cells = [f"green_share_{p:03d}" for p in (0, 25, 50, 75, 100)]
     labels = ("0.00", "0.25", "0.50", "0.75", "1.00")
     fig, axes = plt.subplots(1, 2, figsize=(7.4, 3.1))
@@ -405,7 +516,16 @@ def fig4(data):
 
 
 def fig5(data):
-    """Block 2: the deviator's own penalty over both axes of D-72."""
+    """Block 2: the deviator's own penalty over both axes of D-72.
+
+    Not used in Chapter 5 (24.09.). `dev_ext_ct` sums the deviating household's
+    externality penalty over all its area rows, so it includes the 0.094 ct per
+    week it pays as a buyer on its own delivery noise in other slots; and panel
+    (b), a coalition's penalty on log axes, reads as the superadditivity that
+    the analysis refuted (per penalised kWh the coalitions pay 2.61-2.67 ct
+    against 3.14 ct alone). Tables 5.4 and 5.9 report both axes instead. Kept
+    for the record of the 18.09. draft; built only with `--all` or `5`.
+    """
     fig, axes = plt.subplots(1, 2, figsize=(7.4, 3.2))
 
     seller_shares = (("b2_sell_s10", 0.10), ("b2_sell_s20", 0.20),
@@ -498,30 +618,41 @@ def fig6(data):
 
 
 def fig7(data):
-    """Gamma prices the shortfall channel, and only the shortfall channel."""
-    cells = ("b2_short_g110", "b2_short_g150", "b2_short_g200", "b2_short_g300")
+    """Gamma prices the shortfall channel, and only the shortfall channel.
+
+    All four values of gamma on all three series (Table 5.6). The honest
+    sellers are read from the withholding arm, whose deviator carries no
+    shortfall, so the slot sum of shortfall penalties is theirs alone.
+    """
     gammas = [1.1, 1.5, 2.0, 3.0]
-    fig, ax = plt.subplots(figsize=(4.6, 3.3))
+    under = ("b2_short_g110", "b2_short_g150", "b2_short_g200", "b2_short_g300")
+    withhold = ("b2_sell_s25", "b2_sell_s25_g150", "b2_sell_s25_g200",
+                "b2_sell_s25_g300")
+    fig, ax = plt.subplots(figsize=(4.8, 3.4))
 
-    means, sds = points(data, cells, "dev_short_ct")
-    ax.errorbar(gammas, means, yerr=sds, color=C1, marker="o", linestyle="-",
-                markersize=5, linewidth=1.6, capsize=2,
-                label="deviator, under-delivery arm")
-
-    control = ("b2_sell_s25", "b2_sell_s25_g300")
-    control_means, control_sds = points(data, control, "sum_shortfall_penalty_ct")
-    ax.errorbar([1.1, 3.0], control_means, yerr=control_sds, color=C2,
-                marker="s", linestyle="--", markersize=5, linewidth=1.6,
-                capsize=2, label="honest sellers, withholding arm")
-
-    dev_withheld, _ = points(data, control, "dev_short_ct")
-    ax.plot([1.1, 3.0], [max(v, 0.0) for v in dev_withheld], color=C3,
-            marker="^", linestyle=":", markersize=5, linewidth=1.6,
-            label="deviator, withholding arm")
+    # Colour follows the entity, as in the 18.09. version of this figure; the
+    # legend follows the vertical order of the lines at the right edge.
+    series_spec = (
+        (withhold, "sum_shortfall_penalty_ct", "honest sellers, withholding arm", STYLE[1]),
+        (under, "dev_short_ct", "deviator, under-delivery arm", STYLE[0]),
+        (withhold, "dev_short_ct", "deviator, withholding arm", STYLE[2]),
+    )
+    top = 0.0
+    for cells, key, label, (colour, marker, line) in series_spec:
+        means, sds = points(data, cells, key)
+        means = [max(m, 0.0) for m in means]     # -0.0 prints as a minus sign
+        ax.errorbar(gammas, means, yerr=sds, color=colour, marker=marker,
+                    linestyle=line, markersize=5, linewidth=1.6, capsize=2,
+                    label=label)
+        # Selective direct labels: the value at the right edge only.
+        ax.text(3.08, means[-1], f"{means[-1]:,.1f}", va="center",
+                fontsize=7.5, color=INK)
+        top = max(top, max(m + s for m, s in zip(means, sds)))
 
     ax.set_xticks(gammas)
     ax.set_xticklabels([f"{g:g}" for g in gammas])
-    ax.set_ylim(-12, 215)
+    ax.set_xlim(0.95, 3.35)
+    ax.set_ylim(-0.06 * top, 1.12 * top)
     ax.set_xlabel("penalty factor $\\gamma$")
     ax.set_ylabel("shortfall penalties [ct/week]")
     ax.set_title("Who pays when $\\gamma$ rises")
@@ -529,37 +660,229 @@ def fig7(data):
     save(fig, "fig7_gamma")
 
 
+#: The eight cases in the order of Table 5.3 (= the rows of Table 4.2):
+#: sellers in the upper row, buyers in the lower, short side left of long.
+DR2_CASES = (
+    ("seller_short_withhold", 1, "short side, withholding"),
+    ("seller_short_overreport", 2, "short side, over-reporting"),
+    ("seller_long_withhold", 3, "long side, withholding"),
+    ("seller_long_overreport", 4, "long side, over-reporting"),
+    ("buyer_short_underreport", 5, "short side, under-reporting"),
+    ("buyer_short_overreport", 6, "short side, over-reporting"),
+    ("buyer_long_underreport", 7, "long side, under-reporting"),
+    ("buyer_long_overreport", 8, "long side, over-reporting"),
+)
+
+
+def fig8(_data):
+    """DR2: net gain over the size of the deviation, the eight cases of Table 5.3.
+
+    Read from `dr2_curves.csv` of the analysis output: per case and grid point
+    the median and the 90th percentile over the participant-slots of the
+    honest reference cell. The gain is shown relative to the participant's
+    truthful payoff, so that the eight panels share one scale: a deviation
+    that only forgoes margin reads as a line of slope -1, an over-report that
+    nothing prices as one of slope +1. The thresholds marked in the two
+    short-side seller panels are the medians `dr2_cases.csv` reports.
+    """
+    curves_path = source("analysis", "analysis/*", "dr2_curves.csv",
+                         accept=_checks_passed)
+    curves = {}
+    for row in read_rows(curves_path):
+        curves.setdefault(row["case"], []).append(row)
+    cases = {row["case"]: row for row in read_rows(curves_path.parent / "dr2_cases.csv")
+             if row["type"] == "all"}
+
+    fig, axes = plt.subplots(2, 4, figsize=(9.4, 5.0), sharex=True, sharey=True)
+    for axis, (case, number, title) in zip(axes.flat, DR2_CASES):
+        rows = sorted(curves[case], key=lambda r: float(r["delta_rel"]))
+        delta = [float(r["delta_rel"]) for r in rows]
+        axis.axhline(0.0, color=INK, linewidth=0.7, zorder=1)
+        axis.plot(delta, [100 * float(r["net_rel_p90"]) for r in rows],
+                  color=C2, linestyle="--", linewidth=1.4, zorder=2,
+                  label="90th percentile")
+        axis.plot(delta, [100 * float(r["net_rel_median"]) for r in rows],
+                  color=C1, linestyle="-", linewidth=1.8, zorder=3,
+                  label="median")
+        axis.set_title(f"({number}) {title}\nn = {int(rows[0]['n']):,}",
+                       fontsize=8)
+
+    def mark(axis, x, text, y):
+        axis.axvline(x, color=MUTED, linestyle=":", linewidth=1.0, zorder=1)
+        axis.text(x + 0.012, y, text, fontsize=7, color=MUTED, va="center")
+
+    withhold, over = cases["seller_short_withhold"], cases["seller_short_overreport"]
+    mark(axes[0][0], float(withhold["delta_active_rel_median"]),
+         f"penalty from {float(withhold['delta_active_rel_median']):.3f}", 44)
+    mark(axes[0][1], float(over["delta_active_rel_median"]),
+         f"penalty from {float(over['delta_active_rel_median']):.3f}", 44)
+    mark(axes[0][1], float(over["delta_zero_rel_median"]),
+         f"no gain from {float(over['delta_zero_rel_median']):.3f}", 30)
+    # The long side is still rising where the tested domain ends: a lower
+    # bound, which the figure says rather than leaves to the caption.
+    for axis in (axes[0][3], axes[1][3]):
+        axis.text(0.49, -38, "still rising\nat 0.5", fontsize=7, color=MUTED,
+                  ha="right", va="center")
+
+    axes[0][0].set_ylim(-75, 58)
+    axes[0][0].set_yticks(range(-60, 60, 20))
+    axes[0][0].set_xlim(0.0, 0.5)
+    axes[0][0].set_xticks([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
+    axes[0][0].set_xticklabels(["0", "0.1", "0.2", "0.3", "0.4", "0.5"])
+    axes[0][0].set_ylabel("sellers\nnet gain [% of truthful payoff]")
+    axes[1][0].set_ylabel("buyers\nnet gain [% of truthful payoff]")
+    for axis in axes[1]:
+        axis.set_xlabel("deviation [share of claim]")
+    # Panel 3 has nothing above the zero line; the legend sits there.
+    axes[0][2].legend(loc="upper right", fontsize=7.5)
+    save(fig, "fig8_dr2_curves")
+
+
+def fig9(_data):
+    """DR7: on-chain gas and off-chain cycle over N, in two panels.
+
+    Two measures of different unit and scale are two panels, never two
+    y-axes on one. (a) The `n_axis` rows of the scripted gas series: one
+    clearMarket per N, at the aggregates of N participants. (b) The N-curve:
+    the in-process clearing cycle per slot over the number of orders, every
+    repeat as an open marker and the median as the line (Table 5.10).
+    """
+    gas_path = source("gas", "gas-*", "gas_series.csv")
+    ncurve_path = source("ncurve", "ncurve-*", "ncurve.csv")
+    gas_rows = read_rows(gas_path)
+    n_axis = sorted(((int(r["i"]), int(r["gas_used"])) for r in gas_rows
+                     if r["series"] == "n_axis"))
+    trade = [int(r["gas_used"]) for r in gas_rows if r["series"] == "trade"]
+
+    cycles = {}
+    for row in read_rows(ncurve_path):
+        if row["status"] == "ok":
+            cycles.setdefault(int(row["n"]), []).append(float(row["t_clear_s"]))
+    ns = sorted(cycles)
+    medians = [statistics.median(cycles[n]) for n in ns]
+    per_order = [m / n for n, m in zip(ns, medians) if n >= 50]
+
+    fig, axes = plt.subplots(1, 2, figsize=(8.2, 3.3))
+
+    ax = axes[0]
+    xs, ys = zip(*n_axis)
+    ax.plot(xs, ys, color=C1, marker="o", linestyle="-", markersize=5,
+            linewidth=1.6)
+    ax.set_xscale("log")
+    ax.set_xticks(xs)
+    ax.set_xticklabels([f"{x:,}" for x in xs])
+    ax.xaxis.set_minor_formatter(NullFormatter())
+    ax.set_ylim(0, 260_000)
+    ax.yaxis.set_major_formatter(FuncFormatter(_thousands))
+    ax.set_xlabel("participants N (aggregates anchored)")
+    ax.set_ylabel("gas per clearMarket")
+    ax.set_title("(a) On-chain: gas per window")
+    flat = [y for x, y in n_axis if x >= 50]
+    small = [(x, y) for x, y in n_axis if x < 50]
+    note = f"{min(flat):,} gas" if min(flat) == max(flat) else \
+        f"{min(flat):,} to {max(flat):,} gas"
+    note += " for N ≥ 50"
+    if small:
+        note += "".join(f"\nN = {x}: {y:,}" for x, y in small)
+    if trade:
+        note += (f"\nfirst {len(trade)} clearings of a campaign week:"
+                 f"\n{min(trade):,} to {max(trade):,}")
+    ax.text(0.03, 0.40, note, transform=ax.transAxes, fontsize=7.5,
+            color=INK, va="top")
+
+    ax = axes[1]
+    for n in ns:
+        ax.plot([n] * len(cycles[n]), cycles[n], linestyle="none", marker="o",
+                markersize=3.5, markerfacecolor="white", markeredgecolor=MUTED,
+                markeredgewidth=0.8, zorder=2)
+    ax.plot(ns, medians, color=C1, marker="o", linestyle="-", markersize=5,
+            linewidth=1.6, zorder=3)
+    rate = statistics.median(per_order)
+    ax.plot([ns[0], ns[-1]], [rate * ns[0], rate * ns[-1]], color=MUTED,
+            linestyle=":", linewidth=1.0, zorder=1)
+    # The guide's label sits in the empty lower right, not on the data.
+    ax.text(0.97, 0.05, f"dotted: {1000 * rate:.2f} ms per order \u00d7 N\n"
+            f"(median for N \u2265 50)", transform=ax.transAxes, fontsize=7,
+            color=MUTED, ha="right", va="bottom")
+    ax.axhline(900, color=MUTED, linestyle="-.", linewidth=0.9, zorder=1)
+    ax.text(ns[0], 900 * 1.35, "slot length, 900 s", fontsize=7, color=MUTED)
+    for n, m in zip(ns, medians):
+        if n == 100:
+            ax.text(n * 1.4, m / 2.4, f"{m:,.2f} s", fontsize=7.5, color=INK,
+                    ha="left", va="center")
+        elif n == ns[-1]:
+            ax.text(n / 1.5, m * 1.9, f"{m:,.0f} s", fontsize=7.5, color=INK,
+                    ha="right", va="center")
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlim(ns[0] / 1.6, ns[-1] * 1.6)
+    ax.set_ylim(min(min(v) for v in cycles.values()) / 2.5, 4000)
+    ax.xaxis.set_major_formatter(FuncFormatter(_plain))
+    ax.yaxis.set_major_formatter(FuncFormatter(_plain))
+    ax.set_xlabel("orders per slot N")
+    ax.set_ylabel("clearing cycle [s]")
+    ax.set_title("(b) Off-chain: clearing cycle per slot")
+    save(fig, "fig9_scalability")
+
+
+#: number -> (function, needs the per-run summary, place in Chapter 5, what it shows)
 FIGURES = {
-    1: (fig1, "preference density: pair energy and the fill-rate asymmetry"),
-    2: (fig2, "reciprocity: cleared pair energy and pair count over the mutual share"),
-    3: (fig3, "multiplier formulations on the reference window and the overlap variant"),
-    4: (fig4, "battery participation: grey share and the round types it leaves"),
-    5: (fig5, "block 2: deviator penalty over the share and coalition axes"),
-    6: (fig6, "the deadband: deviation extinguished, honest shortfall absorbed"),
-    7: (fig7, "gamma: the shortfall channel, the deviator and the honest side"),
+    1: (fig1, True, "Figure 5.1", "preference density: pair energy and the fill-rate asymmetry"),
+    2: (fig2, True, "Figure 5.2", "reciprocity: cleared pair energy and pair count over the mutual share"),
+    3: (fig3, True, "Figure 5.6", "multiplier formulations on the reference window and the overlap variant"),
+    4: (fig4, True, "not used", "battery participation: grey share and the round types it leaves"),
+    5: (fig5, True, "not used", "block 2: deviator penalty over the share and coalition axes"),
+    6: (fig6, True, "Figure 5.4", "the deadband: deviation extinguished, honest shortfall absorbed"),
+    7: (fig7, True, "Figure 5.5", "gamma: the shortfall channel, the deviator and the honest side"),
+    8: (fig8, False, "Figure 5.3", "DR2: net gain over the deviation, the eight cases of Table 5.3"),
+    9: (fig9, False, "Figure 5.7", "DR7: gas per window and off-chain cycle over N, two panels"),
 }
+
+#: What a bare `python figures.py` builds: the figures of Chapter 5, in its order.
+CHAPTER = (1, 2, 8, 6, 7, 3, 9)
 
 
 def main(argv):
-    if "--list" in argv:
-        for number, (_, description) in FIGURES.items():
-            print(f"  {number}  {description}")
+    parser = argparse.ArgumentParser(description="Chapter 5 figures.")
+    parser.add_argument("numbers", nargs="*", type=int,
+                        help="figure numbers (default: the seven of Chapter 5)")
+    parser.add_argument("--all", action="store_true",
+                        help="all figures, including the two Chapter 5 does not use")
+    parser.add_argument("--list", action="store_true", help="what each figure shows")
+    parser.add_argument("--refresh", action="store_true",
+                        help="rebuild the cached per-run summary from scratch")
+    for kind in ("analysis", "ncurve", "gas"):
+        parser.add_argument(f"--{kind}", metavar="DIR",
+                            help=f"read this {kind} directory instead of the newest")
+    args = parser.parse_args(argv)
+
+    if args.list:
+        for number, (_, _, chapter, description) in FIGURES.items():
+            print(f"  {number}  {chapter:<11} {description}")
         return
-    wanted = [int(a) for a in argv if a.isdigit()] or sorted(FIGURES)
+    for kind in ("analysis", "ncurve", "gas"):
+        if getattr(args, kind):
+            PINNED[kind] = getattr(args, kind)
+    wanted = sorted(FIGURES) if args.all else (args.numbers or list(CHAPTER))
     unknown = [n for n in wanted if n not in FIGURES]
     if unknown:
         raise SystemExit(f"no such figure: {unknown}; try --list")
-    print("summary:")
-    data = summary(refresh="--refresh" in argv)
+
+    data = None
+    if any(FIGURES[n][1] for n in wanted):
+        print("summary:")
+        data = summary(refresh=args.refresh)
     print("figures:")
     for number in wanted:
-        function, _ = FIGURES[number]
+        function, _, chapter, _ = FIGURES[number]
+        print(f"  fig{number} ({chapter})")
         try:
             function(data)
         except KeyError as error:
             # A cell that was never run is a missing figure, not a crash: the
             # sweep group in particular may not be present in an older `out/`.
-            print(f"  fig{number} skipped -- no runs for cell {error}")
+            print(f"  fig{number} skipped -- no runs or rows for {error}")
+        except FileNotFoundError as error:
+            print(f"  fig{number} skipped -- {error}")
     print(f"figures in {FIG}")
 
 

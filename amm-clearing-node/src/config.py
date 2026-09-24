@@ -53,8 +53,9 @@ _PREFERENCE_ENV_OVERRIDES = {
 }
 
 # Allocation order, multiplier formulation and the side(s) the multiplier is
-# applied to are all unresolved semantics — both variants must stay runnable.
-# TODO(confirm-with-supervisor): B-04.
+# applied to stay runnable as configuration axes (D-19): `preferences_first`
+# is the design and `pro_rata_first` the comparison variant, and
+# `sides = "seller"` is the evaluation default (D-30).
 PREFERENCE_ORDERS = ("preferences_first", "pro_rata_first")
 MULTIPLIER_MODES = ("multiplicative", "additive")
 MULTIPLIER_SIDES = ("seller", "both")
@@ -73,9 +74,9 @@ class CommunityParams:
     pool_id: str | None = None
 
     def pool_for(self, community_uuid: str) -> str:
-        # TODO(confirm-with-supervisor): pool naming convention and whether
-        # the pool must be registered as an area in `community_areas`
-        # (guide §7.1). Current plan: AMM_POOL_{community_uuid}.
+        # NOTE(poc-scope): the PoC names the pool AMM_POOL_{community_uuid}
+        # and does not register it as an area in `community_areas`. A
+        # production naming scheme is outside the proof of concept.
         return self.pool_id or f"AMM_POOL_{community_uuid}"
 
 
@@ -88,10 +89,10 @@ class PreferenceConfig:
     detected and reported while quantities stay purely pro-rata
     ("pro_rata_first", the pre-Phase-2 baseline).
 
-    `mode` selects the multiplier formulation: "multiplicative" follows the
-    implementation guide (green bonus scaled down when the grey levy
-    under-collects, pool keeps any over-collection), "additive" follows the
-    InfoPaper (bonus-driven and zero-sum by construction).
+    `mode` selects the multiplier formulation: in "multiplicative" the levy
+    is the parameter, the bonus is scaled to what the levy funds, and any
+    over-collection stays with the pool; in "additive" the bonus is the
+    parameter, the levy follows from funding it, and the round is zero-sum.
 
     `sides` selects who sees an adjusted rate: only sellers (current UI
     semantics) or buyers as well.
@@ -239,9 +240,11 @@ def resolve_community(cfg: Config, community_uuid: str,
     """Sigmoid parameters for a community.
 
     Falls back to `default_community` for unknown communities. `overrides`
-    lets the trigger payload supply parameters directly — a PoC convenience
-    for the demo UI. TODO(confirm-with-supervisor): in production, parameter
-    governance lives in the contract owner / configuration, not the trigger.
+    lets the trigger payload supply parameters directly.
+    NOTE(poc-scope): a PoC convenience for the demo UI and the evaluation
+    harness. In production the parameters belong to the configuration and
+    the contract owner; what the artifact enforces today is the start-up
+    check against the on-chain parameters (`verify_community_params`).
     """
     params = cfg.communities.get(community_uuid, cfg.default_community)
     if overrides:
@@ -267,9 +270,11 @@ def resolve_preferences(cfg: Config,
     `overrides` lets the trigger payload supply the parameters directly —
     the same PoC convenience as `sigmoid_params`, so both `order` variants
     and both multiplier `mode`s are runnable from the demo UI without a
-    redeploy. TODO(confirm-with-supervisor): in production, parameter
-    governance lives in the configuration / contract owner, not in the
-    trigger payload.
+    redeploy. NOTE(poc-scope): a PoC convenience for the demo UI and the
+    evaluation harness. In production the parameters belong to the
+    configuration and the contract owner; what the artifact enforces today
+    is the start-up check against the on-chain parameters
+    (`verify_community_params`).
     """
     params = cfg.preferences
     if overrides:

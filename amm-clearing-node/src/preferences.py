@@ -244,7 +244,7 @@ def _mutual_pairs(bids: list[dict], offers: list[dict]) -> list[tuple[int, int]]
             # An area is not its own counterparty: self-pairing would pass
             # the mutuality check below — an area on both sides *is* on the
             # opposite side of itself — and buy free preference priority
-            # (D-58). Kept here as well as in the clearing's book check, so
+            # (D-61). Kept here as well as in the clearing's book check, so
             # it holds even if that check is later relaxed.
             if bid.get("area_uuid") == offer.get("area_uuid"):
                 continue
@@ -402,7 +402,7 @@ def apply_preference_allocation(
 
 def _multiplicative_rates(green_alloc: float, grey_alloc: float, price: float,
                           cfg: PreferenceConfig) -> tuple[float, float]:
-    """Guide formulation. Returns (green_final, grey_final).
+    """Multiplicative formulation. Returns (green_final, grey_final).
 
     The grey levy is the parameter; the green bonus is scaled down when the
     levy does not fully fund it. When the levy *over*-collects, the scaling
@@ -429,7 +429,7 @@ def _multiplicative_rates(green_alloc: float, grey_alloc: float, price: float,
 
 def _additive_rates(green_alloc: float, grey_alloc: float, price: float,
                     cfg: PreferenceConfig) -> tuple[float, float]:
-    """InfoPaper formulation. Returns (green_final, grey_final).
+    """Additive formulation. Returns (green_final, grey_final).
 
     Bonus-driven and zero-sum by construction: the green bonus per kWh is the
     parameter and the grey levy per kWh follows from funding it completely.
@@ -440,9 +440,9 @@ def _additive_rates(green_alloc: float, grey_alloc: float, price: float,
     the pot would make that individual bound depend on the grey volume other
     participants happen to bring (D-45).
 
-    TODO(verify-against-infopaper): this formulation is reconstructed from the
-    worked example (48.75 / 51.25 / 60), not quoted from the paper. Verify
-    before relying on it for evaluation results.
+    The additive formulation is defined in this work and named in D-38;
+    `test_additive_mode_reproduces_the_worked_example` pins its behaviour on
+    a worked example.
     """
     bonus_per_kwh = price * cfg.green_multiplier
     if grey_alloc <= EPSILON:
@@ -518,15 +518,16 @@ def apply_energy_type_multipliers(trades: list[dict], *, clearing_price: float,
     *adds* `final_energy_rate`, `energy_type` and `multiplier_applied`
     alongside it. The uniform price stays the settlement reference and the
     multiplier is a redistribution layer on top of it.
-    TODO(confirm-with-supervisor): B-03 — whether the settlement rate the
-    production system records is the uniform or the adjusted one.
+    `energy_rate` stays the uniform clearing price; `final_energy_rate`
+    carries the adjusted rate (D-21, D-29).
 
     `sides == "seller"` adjusts only the seller trades (buyers pay `p`).
     `sides == "both"` also passes the pool's net position through to the
     buyers: since the pool is uniform, every buyer is served the same
     green/grey mix, so the buyer rate is that mix's volume-weighted final
     rate — which makes the round zero-sum even in multiplicative mode.
-    TODO(confirm-with-supervisor): B-04.
+    Orders, modes and sides stay configuration axes (D-19); `sides =
+    "seller"` is the evaluation default (D-30).
 
     The trades are mutated in place; the round-level economics are returned.
     """

@@ -245,7 +245,9 @@ class Web3ContractClient(BaseContractClient):
         """community_uuid strings (e.g. "communityid_1") are not 32 bytes.
         Convention: pass 32-byte hex through, otherwise keccak256(utf-8).
         Must match scripts/deploy.js `toBytes32`.
-        TODO(confirm-with-supervisor): agree on the canonical conversion."""
+        NOTE(poc-scope): fixed in code and in scripts/deploy.js (`toBytes32`),
+        and used for the Volta deployment of 29.08.2026. A production system
+        needs one convention across all writers."""
         if _HEX32_RE.match(value):
             return hex_str_to_bytes32(value)
         return bytes(self._Web3.keccak(text=value))

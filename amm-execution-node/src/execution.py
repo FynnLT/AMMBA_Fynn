@@ -25,8 +25,8 @@ logger = logging.getLogger("amm-execution-node.execution")
 
 _POOL_PREFIX = "AMM_POOL_"
 
-# Result-row fields written back into trade `parameters` (output schema TBD,
-# see `OffchainDBClient.update_trade`).
+# Result-row fields written back into trade `parameters`, a declared extension
+# of the published GSY interface (D-48, see `OffchainDBClient.update_trade`).
 _PENALTY_PARAM_KEYS = ("actual_kwh", "measurement_found", "deliverable_kwh",
                        "deliverable_source", "shortfall_kwh",
                        "shortfall_penalty_ct", "externality_kwh",

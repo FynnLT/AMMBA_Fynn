@@ -85,7 +85,7 @@ preferences:
   order: "preferences_first"        # "preferences_first" | "pro_rata_first"
   multipliers:
     enabled: true
-    mode: "multiplicative"          # "multiplicative" (Guide) | "additive" (InfoPaper)
+    mode: "multiplicative"          # "multiplicative" | "additive"
     sides: "seller"                 # "seller" | "both"
     green_multiplier: 0.10
     grey_levy: 0.10
@@ -94,12 +94,14 @@ preferences:
 
 The demo UI sends only `green_multiplier`, `grey_levy` and `levy_cap`; `order`,
 `mode` and `sides` come from the configuration alone, so switching variant is a
-config change rather than a code change (supervisor question **B-04** is still
-open, and evaluation block 1 compares exactly these variants):
+config change rather than a code change. Orders, modes and sides stay
+runnable as configuration axes (D-19): `preferences_first` is the design,
+`pro_rata_first` the comparison variant, and `sides = "seller"` the evaluation
+default (D-30); evaluation block 1 compares exactly these variants:
 
 ```bash
 PREFERENCE_ORDER=pro_rata_first docker-compose up      # pro-rata baseline
-MULTIPLIER_MODE=additive docker-compose up             # InfoPaper formulation
+MULTIPLIER_MODE=additive docker-compose up             # additive formulation
 ```
 
 After each clearing, panel C echoes back the rules the Clearing Node reported

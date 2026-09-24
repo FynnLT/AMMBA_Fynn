@@ -65,9 +65,10 @@ def seller_externality_penalty(energy_traded: float, actual_deliverable: float,
     p_counterfactual = sigmoid_price(
         counterfactual_ratio, sigmoid["k_upper"], sigmoid["k_lower"],
         sigmoid["theta"], sigmoid["steepness"])
-    # TODO(confirm-with-supervisor): the spec multiplies by the round's
-    # traded_quantity (market-wide volume), not the agent's own volume —
-    # confirm this VCG interpretation.
+    # Charged on the round's traded quantity Q_t, not on the seller's own
+    # volume: Saber et al. (2026), Applied Energy 416, 127957, §2.4.1
+    # Eq. (28), as printed — Eq. (4.4) in this thesis. The buyer side is
+    # Eq. (29), Eq. (4.5) here.
     penalty = max(0.0, (clearing_price - p_counterfactual) * traded_quantity_kwh)
     return {
         "withheld_kwh": round(withheld, 6),
@@ -85,7 +86,9 @@ def buyer_externality_penalty(reported_demand: float, actual_demand: float,
 
     Counterfactual: had the true demand been reported, demand would have been
     higher and the clearing price higher for all sellers. (No η tolerance for
-    buyers in the spec.)
+    buyers in the spec.) Charged on the round's traded quantity Q_t like the
+    seller side: Saber et al. (2026), §2.4.1 Eq. (29) — Eq. (4.5) in this
+    thesis.
     """
     underreported = max(0.0, actual_demand - reported_demand)
     if underreported <= _EPSILON:
@@ -110,17 +113,22 @@ def redistribution(rows: list[dict], clearing_price: float,
 
     Budget balance is a property of the rule, not an assumption:
     summed over one market side, Σ_i (p − p_cf)·q_i = (p − p_cf)·Q_t is
-    exactly the externality penalty. `budget_balance_ct` is reported so a
-    round where it does *not* hold — several simultaneous deviators, whose
-    counterfactuals are not additive — is visible in the output instead of
-    being averaged away.
+    exactly the externality penalty, and compensation is
+    `penalty_pool · damage_i / total_damage`, so it sums to the pool whenever
+    `total_damage > ε` — for one deviator or for many. What several
+    simultaneous deviators change is the *coverage*: whether the pool
+    matches the damage measured against a joint counterfactual that puts all
+    their quantities back at once, since the per-deviator counterfactuals
+    are not additive. The node does not compute coverage (Chapter 4.3.6).
+    `budget_balance_ct` is non-zero in exactly one case: `total_damage <= ε`,
+    where the pool is reported undistributed.
 
     The harmed set is the deviators' *counterparty* side: a seller who
     withholds raises the price, so the buyers are harmed and the remaining
     sellers profit; a buyer who underreports depresses it, so the sellers are
     harmed. Deviators themselves are excluded (D-43), but only on the
     externality axis — a seller carrying a `shortfall_penalty_ct` is still
-    compensated (D-61): a shortfall does not manipulate the price and is
+    compensated (D-64): a shortfall does not manipulate the price and is
     already penalised on its own axis.
 
     `harmed_side_kwh` is the invariant that guards the harmed set itself:

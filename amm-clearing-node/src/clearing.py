@@ -267,7 +267,7 @@ async def _anchor_or_recover(chain: BaseContractClient, *, market_id: str,
     unauthorised caller still propagates and fails the run loudly.
 
     Returns the anchor outcome as a dict. Beyond the settled price and hash it
-    carries what a campaign cannot count from log lines (D-60, issue #28): the
+    carries what a campaign cannot count from log lines (D-63, issue #28): the
     two prices a recovery had to choose between, which of them the response
     settles on, and whether the anchor's transaction hash could be read back
     at all. `price_source` and `anchor_tx_hash_recovered` are present on every
@@ -328,7 +328,7 @@ async def _anchor_or_recover(chain: BaseContractClient, *, market_id: str,
         "clearing_price": price,
         "recovered_from_anchor": True,
         # Both prices, so the divergence is readable from the response rather
-        # than only from a warning nobody greps over 672 slots (D-60).
+        # than only from a warning nobody greps over 672 slots (D-63).
         "anchored_price_ct": anchored_price,
         "recomputed_price_ct": clearing_price,
         "price_source": price_source,
@@ -400,7 +400,7 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
     bids = [o for o in open_orders if o.get("order_type") == "Bid"]
     offers = [o for o in open_orders if o.get("order_type") == "Offer"]
 
-    # One side per area and slot (D-58). The assumption is relied on in three
+    # One side per area and slot (D-61). The assumption is relied on in three
     # places and was enforced in none: the Execution Node keys its measurement
     # lookup on the area alone, so an area on both sides would have one meter
     # reading read once as delivered and once as consumed; and an area posting
@@ -479,9 +479,10 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
 
     # ---- Step 8: persist trades, then update order statuses -------------
     await db.post_trades(trades)
-    # TODO(confirm-with-supervisor): residual policy for partial fills
-    # (guide §7.8). PoC marks every matched order Executed; the residual
-    # amount is recorded on the trade object (residual_bid/-_offer).
+    # NOTE(poc-scope): the PoC marks every matched order Executed and
+    # records the remainder on the trade (`residual_bid` / `residual_offer`).
+    # Whether production keeps the order open or re-posts the remainder is
+    # outside the proof of concept.
     await asyncio.gather(*(db.update_order(o["order_id"], status="Executed")
                            for o in bids + offers))
 
@@ -507,7 +508,7 @@ async def run_clearing(trigger: dict, cfg: Config, db: OffchainDBClient,
         status="cleared",
         # Explicit, so a caller can tell a first clearing from one that
         # continued an anchor left behind by a failed write-back — plus the
-        # recovery's own divergence keys (D-60) and the anchor-hash flag (#28).
+        # recovery's own divergence keys (D-63) and the anchor-hash flag (#28).
         **{key: anchor[key] for key in
            ("recovered_from_anchor", "anchored_price_ct",
             "recomputed_price_ct", "price_source",

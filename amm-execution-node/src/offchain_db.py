@@ -115,9 +115,10 @@ class OffchainDBClient:
                            parameters: dict | None = None) -> dict | None:
         """Write the penalty result back onto the trade.
 
-        TODO(confirm-with-supervisor): penalty output schema — extend trade
-        `parameters` (current PoC approach, via a mock-only PATCH endpoint) or
-        a separate /penalties endpoint?
+        The penalty result extends the trade `parameters`, an extension of
+        the published GSY interface declared as such (D-48). The published
+        off-chain storage has no route for it, hence the mock-only
+        `PATCH /trades`.
 
         The production service registers no PATCH route
         (gsy-offchain-storage/src/startup.rs @ aa99ea2), so a 404/405 is a

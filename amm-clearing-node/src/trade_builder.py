@@ -29,9 +29,10 @@ def blake2b_hash(data: dict) -> str:
 
 
 def _residual(total_energy: float, allocated: float, energy_rate: float) -> dict | None:
-    # TODO(confirm-with-supervisor): partial-fill residual policy (guide §7.8)
-    # — keep order Open with reduced energy, or Executed + re-post remainder?
-    # The PoC records the residual on the trade object only.
+    # NOTE(poc-scope): the PoC marks every matched order Executed and
+    # records the remainder on the trade (`residual_bid` / `residual_offer`).
+    # Whether production keeps the order open or re-posts the remainder is
+    # outside the proof of concept.
     remainder = total_energy - allocated
     if remainder > RESIDUAL_EPSILON:
         return {"energy": round(remainder, _ROUND), "energy_rate": energy_rate}

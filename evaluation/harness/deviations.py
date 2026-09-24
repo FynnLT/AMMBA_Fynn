@@ -12,7 +12,7 @@ read off the execution node rather than assumed:
    traded**, not the same. See `SELLER_ARM` below.
 
 2. **The buyer externality is `max(0, actual - reported)`**
-   (`penalties.py:90`), and `reported_kwh` is the original bid volume
+   (`penalties.py:93`), and `reported_kwh` is the original bid volume
    (allocation + residual, `execution.py:59-67`), i.e. `requested_kwh`. A
    buyer deviates by consuming *more* than it bid. D-72 first said "buyers
    under-consume"; on this artifact that produces no penalty at all, because

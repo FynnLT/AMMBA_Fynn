@@ -38,20 +38,21 @@ market:
 # demo UI no longer offers them and its trigger payload carries only the three
 # numeric multiplier parameters, so these three values are whatever this file
 # (or PREFERENCE_ORDER / MULTIPLIER_MODE / MULTIPLIER_SIDES) says. Running a
-# different variant is a configuration change, not a code change — which is
-# the point while B-04 is open, and how evaluation block 1 produces its
-# comparison (pro_rata_first baseline, multiplicative vs. additive).
+# different variant is a configuration change, not a code change — orders,
+# modes and sides stay configuration axes (D-19), and this is how evaluation
+# block 1 produces its comparison (pro_rata_first baseline, multiplicative vs.
+# additive).
 preferences:
   enabled: true
-  # Semantics of the allocation order. Supervisor question B-04 is unresolved,
-  # so BOTH variants must be runnable — the comparison is an evaluation result.
-  # TODO(confirm-with-supervisor): B-04.
+  # Allocation order: `preferences_first` is the design, `pro_rata_first` the
+  # comparison variant; orders, modes and sides stay runnable as
+  # configuration axes (D-19).
   order: "preferences_first"        # "preferences_first" | "pro_rata_first"
 
   multipliers:
     enabled: true
-    mode: "multiplicative"          # "multiplicative" (Guide) | "additive" (InfoPaper)
-    sides: "seller"                 # "seller" | "both" — also unresolved (B-04)
+    mode: "multiplicative"          # "multiplicative" | "additive"
+    sides: "seller"                 # "seller" | "both" — "seller" is the evaluation default (D-30)
     green_multiplier: 0.10
     grey_levy: 0.10
     levy_cap: 0.20
@@ -64,8 +65,9 @@ communities:
     k_lower_ct_per_kwh: 8.0       # Feed-in tariff
     theta: 1.0                    # Sigmoid midpoint (optimized offline)
     steepness: 0.6                # Sigmoid steepness (optimized offline)
-    # TODO(confirm-with-supervisor): pool naming convention + whether the pool
-    # must be registered as an area in community_areas (guide §7.1).
+    # NOTE(poc-scope): the PoC names the pool AMM_POOL_{community_uuid} and
+    # does not register it as an area in community_areas. A production
+    # naming scheme is outside the proof of concept.
     pool_id: "AMM_POOL_communityid_1"
 
 default_community:

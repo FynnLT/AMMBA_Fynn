@@ -791,8 +791,8 @@ function readPreferenceInputs() {
 const RULE_LABELS = {
   order: { preferences_first: "preferred pairs first",
            pro_rata_first: "pro-rata first (pairs flagged only)" },
-  mode: { multiplicative: "multiplicative multipliers (Guide)",
-          additive: "additive multipliers (InfoPaper)" },
+  mode: { multiplicative: "multiplicative multipliers",
+          additive: "additive multipliers" },
   sides: { seller: "applied to sellers only",
            both: "applied to sellers &amp; buyers" },
 };

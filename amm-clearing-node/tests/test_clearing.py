@@ -462,7 +462,7 @@ async def test_a_foreign_market_trade_does_not_suppress_the_clearing(cfg):
     assert result["clearing_price_ct_per_kwh"] == pytest.approx(15.147225)
 
 
-# ------------------------------- D-60 / #28: what a recovery has to report
+# ------------------------------- D-63 / #28: what a recovery has to report
 
 class _AnchorAtChain(MockContractClient):
     """A chain that reports "already cleared" and hands back a stored anchor.
@@ -498,7 +498,7 @@ async def test_a_normal_run_reports_a_computed_price_source(cfg):
 
 @pytest.mark.anyio
 async def test_a_diverging_anchor_is_reported_not_only_logged(cfg):
-    """D-60: the anchor wins, and the divergence leaves the log.
+    """D-63: the anchor wins, and the divergence leaves the log.
 
     In a recovery `clearMarket` reverts on the duplicate market *before* its
     bounds check runs, so the recomputed price is the one no contract has

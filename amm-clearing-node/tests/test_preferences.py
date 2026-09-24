@@ -399,7 +399,7 @@ async def test_additive_mode_is_zero_sum(green_multiplier, grey_levy,
 
 
 @pytest.mark.anyio
-async def test_additive_mode_reproduces_the_infopaper_shape():
+async def test_additive_mode_reproduces_the_worked_example():
     """Bonus-driven: the levy per kWh follows from funding the bonus."""
     result = await clear(reference_book(mutual=True), mode="additive",
                          green_multiplier=0.10, levy_cap=1.0)
@@ -753,11 +753,11 @@ async def test_multipliers_do_not_change_execution_node_penalties():
     assert any(row["total_penalty_ct"] > 0 for row in penalties_with)
 
 
-# ------------------------------------------- D-58: one side per area + slot
+# ------------------------------------------- D-61: one side per area + slot
 
 @pytest.mark.anyio
 async def test_an_area_on_both_sides_is_rejected():
-    """D-58 (a): the book check, with the offending area named.
+    """D-61 (a): the book check, with the offending area named.
 
     An area holding a Bid and an Offer in the same market breaks the
     Execution Node's measurement lookup, which is keyed by area alone: one
@@ -786,7 +786,7 @@ async def test_a_clean_book_passes_the_one_side_check():
 
 
 def test_an_area_is_never_its_own_preferred_partner():
-    """D-58 (b): the mutuality check must reject self-pairing.
+    """D-61 (b): the mutuality check must reject self-pairing.
 
     An area posting on both sides *is* on the opposite side of itself, so
     without this the pair would match and buy free preference priority. Kept

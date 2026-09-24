@@ -62,7 +62,7 @@ DERIVED_FIELDS = ("crossover_mult",)
 #: would be testing its own arithmetic against itself.
 #:
 #: The last four are the execution response's `penalty_params` block
-#: (`execution.py:246-253`), and they are here because the parameter sweep
+#: (`execution.py:248-254`), and they are here because the parameter sweep
 #: needs them: `gamma: None` in a spec means "whatever the execution node's
 #: configuration held that day", which is Finding C in a second place, and a
 #: sweep CSV that does not carry its own gamma cannot be read without its

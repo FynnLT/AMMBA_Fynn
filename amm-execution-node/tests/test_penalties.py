@@ -105,7 +105,7 @@ class TestBuyerExternality:
 
 
 class TestRedistribution:
-    """Proportional compensation of the price damage (D-42/D-43/D-61).
+    """Proportional compensation of the price damage (D-42/D-43/D-64).
 
     Rows are constructed directly rather than driven through `run_execution`:
     the function's contract is the participant-row shape, and hand-computed
@@ -186,7 +186,7 @@ class TestRedistribution:
         assert result["excluded_deviators"] == []
 
     def test_a_seller_with_a_shortfall_is_still_compensated(self):
-        """D-61: only an externality penalty excludes from the harmed set.
+        """D-64: only an externality penalty excludes from the harmed set.
 
         Demand-limited round — a buyer underreports, so the sellers are
         harmed. One of them carries a shortfall penalty: that does not

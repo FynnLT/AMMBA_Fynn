@@ -109,7 +109,7 @@ def test_the_buyer_arm_over_consumes_against_its_own_bid():
     """D-72, corrected 17.09.: the paper's buyer case is under-*reporting*
     demand, i.e. actual above reported. Under-consuming produces no penalty
     at all on this artifact -- buyers have no shortfall term and a negative
-    externality clamps to zero (`penalties.py:90`)."""
+    externality clamps to zero (`penalties.py:93`)."""
     plan = _plan(arm=deviations.BUYER_ARM, share=0.25, k=1,
                  deviators=("player-010",))
     measurements, forecasts = deviations.apply(

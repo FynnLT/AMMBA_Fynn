@@ -16,9 +16,10 @@ Mock-only conveniences, each clearly marked:
 * ``PATCH /orders/{order_id}`` — the production service registers no PATCH
   route; there, order status is driven by the blockchain event listener. The
   clients treat a 404/405 on it as a no-op, so this stays a pure convenience.
-* ``PATCH /trades/{trade_uuid}`` — TODO(confirm-with-supervisor): penalty
-  output schema is unresolved. The PoC extends the trade ``parameters``
-  field through this endpoint.
+* ``PATCH /trades/{trade_uuid}`` — the penalty result extends the trade
+  ``parameters``, an extension of the published GSY interface declared as
+  such (D-48). The published off-chain storage has no route for it, hence
+  this mock-only endpoint.
 * ``POST /reset`` — wipes the store (used by tests and demos).
 """
 
@@ -185,8 +186,9 @@ def create_app(store: InMemoryStore | None = None) -> FastAPI:
     @app.patch("/trades/{trade_uuid}")
     async def patch_trade(trade_uuid: str, patch: dict = Body(...)) -> dict:
         # MOCK-ONLY endpoint, like PATCH /orders above.
-        # TODO(confirm-with-supervisor): penalty output schema unresolved —
-        # the PoC extends the trade `parameters` field in place.
+        # The penalty result extends the trade `parameters` in place, an
+        # extension of the published GSY interface declared as such (D-48);
+        # the published off-chain storage has no route for it.
         trade = store.trades.get(trade_uuid)
         if trade is None:
             raise HTTPException(status_code=404,

@@ -32,8 +32,11 @@ logger = logging.getLogger("amm-clearing-node")
 
 class SigmoidParams(BaseModel):
     """PoC convenience: the demo UI passes the community's sigmoid parameters
-    with the trigger. TODO(confirm-with-supervisor): production parameter
-    governance (configuration / contract owner), not trigger payloads."""
+    with the trigger. NOTE(poc-scope): a PoC convenience for the demo UI and
+    the evaluation harness. In production the parameters belong to the
+    configuration and the contract owner; what the artifact enforces today
+    is the start-up check against the on-chain parameters
+    (`verify_community_params`)."""
     k_upper: float | None = None
     k_lower: float | None = None
     theta: float | None = None
@@ -44,8 +47,10 @@ class PreferenceParams(BaseModel):
     """PoC convenience, same rationale as `SigmoidParams`: the demo UI passes
     the preference settings with the trigger so both allocation orders and
     both multiplier modes are runnable without a redeploy.
-    TODO(confirm-with-supervisor): production parameter governance
-    (configuration / contract owner), not trigger payloads."""
+    NOTE(poc-scope): a PoC convenience for the demo UI and the evaluation
+    harness. In production the parameters belong to the configuration and
+    the contract owner; what the artifact enforces today is the start-up
+    check against the on-chain parameters (`verify_community_params`)."""
     enabled: bool | None = None
     order: str | None = None
     multipliers_enabled: bool | None = None

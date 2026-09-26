@@ -36,7 +36,26 @@ READINGS = (
     "back to the manifest -- `config.gamma` / `config.eta_relative` only "
     "when both are set explicitly, `config.sigmoid` for the band -- and "
     "`census.param_source` / `census.sigmoid_source` say which.",
+    "The dr2_full_* tables replay the block-1 cells with the artifact's "
+    "preference allocation and origin settlement (the *full* engine) and "
+    "compare every participant-slot with the same engine at "
+    "`PreferenceConfig(enabled=False)` on the same order book (the "
+    "*baseline*: pro rata, every rate the rounded price). Both settle at "
+    "the six-decimal rates `run_clearing` writes and price and penalise at "
+    "the unrounded sigmoid. Nominations and energy types are held fixed. "
+    "Block 1 was not executed, so gamma and eta_relative are the reference "
+    "setting (1.1 / 0.10, from b2_noise_off; `checks.json` names the "
+    "source). `profitable` means net_max > 1e-6 ct, as in dr2_cases.",
 )
+
+#: The per-cell comparison of the full engine and its baseline, shared by the
+#: net_max quantiles of dr2_full_cases.
+_NET_MAX = tuple(
+    (f"net_max_{engine}_ct_{stat}",
+     f"{label} of the largest net gain over the grid, {name} engine, ct")
+    for engine, name in (("full", "full"), ("base", "baseline"))
+    for stat, label in (("median", "median"), ("p90", "90th percentile"),
+                        ("max", "maximum")))
 
 COLUMNS = {
     "census": (
@@ -375,6 +394,97 @@ COLUMNS = {
         ("k1_penalty_ct", "its penalty within this cell, ct"),
         ("k1_penalized_kwh", "its penalised quantity within this cell"),
         ("k1_penalty_per_kwh_ct", "k1_penalty_ct / k1_penalized_kwh"),
+    ),
+    "dr2_full_cases": (
+        ("cell", "block-1 cell, all seeds"),
+        ("case", "side_role_direction, one of the eight rows of Table 4.2 "
+                 "(as in dr2_cases)"),
+        ("table_4_2_row", "row of Table 4.2, as in dr2_cases"),
+        ("group", "all; matched / unmatched (in a mutual pair in that slot "
+                  "at the truthful report, whatever the order); green / grey "
+                  "(seller cases only); household / battery (area id prefix "
+                  "battery-)"),
+        ("n", "participant-slots of the cell (five seeds) in the case and "
+              "group"),
+        ("share_profitable_full", "share with net_max > 1e-6 ct in the full "
+                                  "engine"),
+        ("share_profitable_base", "share with net_max > 1e-6 ct in the "
+                                  "baseline on the same book"),
+        ("n_additional", "profitable in the full engine and not in the "
+                         "baseline; the Table 4.3 prediction for the full "
+                         "artifact is 0"),
+        ("n_removed", "profitable in the baseline and not in the full "
+                      "engine"),
+        ("n_gain_increased", "profitable in both, net_max_full - "
+                             "net_max_base > 1e-6 ct"),
+        ("n_gain_decreased", "profitable in both, net_max_full - "
+                             "net_max_base < -1e-6 ct"),
+        *_NET_MAX,
+        ("diff_ct_median", "median of net_max_full - net_max_base, ct"),
+        ("diff_ct_p90", "90th percentile of the same, ct"),
+        ("diff_ct_max", "maximum of the same, ct"),
+        ("diff_ct_min", "minimum of the same, ct"),
+        ("net_max_full_rel_median", "median of net_max_full / the full "
+                                    "engine's truthful payoff (payoff > 0 "
+                                    "only)"),
+        ("delta_star_full_median", "median maximiser delta* / claim, full "
+                                   "engine"),
+        ("delta_zero_full_median", "median delta_zero / claim, full engine "
+                                   "(0 where no deviation pays, inf where "
+                                   "it pays over the whole grid)"),
+        ("share_switch_any", "share whose sweep switches the regime anywhere "
+                             "on the grid (the same in both engines)"),
+        ("prop2_n_violations_full", "short-side sellers only: Proposition 2 "
+                                    "violations in the full engine, as "
+                                    "prop2_n_violations of dr2_cases"),
+    ),
+    "dr2_full_curves": (
+        ("cell", "block-1 cell, all seeds"),
+        ("case", "as in dr2_full_cases"),
+        ("delta_rel", "delta / claim, grid point"),
+        ("n", "participant-slots in the case"),
+        ("net_full_ct_median", "median net gain, full engine, ct"),
+        ("net_full_ct_p90", "90th percentile net gain, full engine, ct"),
+        ("net_base_ct_median", "median net gain, baseline, ct"),
+        ("net_base_ct_p90", "90th percentile net gain, baseline, ct"),
+        ("diff_ct_median", "median of net_full - net_base at this grid "
+                           "point, ct"),
+        ("diff_ct_p90", "90th percentile of the same, ct"),
+        ("net_full_rel_median", "median net gain / the full engine's "
+                                "truthful payoff"),
+        ("net_full_rel_p90", "90th percentile of the same"),
+        ("net_base_rel_median", "median net gain / the baseline's truthful "
+                                "payoff"),
+        ("net_base_rel_p90", "90th percentile of the same"),
+        ("diff_rel_median", "median of net_full_rel - net_base_rel: the "
+                            "change in the relative gain, each against its "
+                            "own engine's truthful payoff"),
+        ("diff_rel_p90", "90th percentile of the same"),
+    ),
+    "dr2_full_examples": (
+        ("cell", "block-1 cell"),
+        ("rank", "1 = largest diff_ct in the cell; only diff_ct > 1e-6 ct, "
+                 "at most 20"),
+        ("run_id", "run id"),
+        ("seed", "replicate seed"),
+        ("slot", "delivery slot (unix seconds)"),
+        ("area", "area id of the deviating participant"),
+        ("case", "as in dr2_full_cases"),
+        ("energy_type", "green / grey for sellers, mixed for buyers"),
+        ("claim_kwh", "requested_kwh: the truthful report"),
+        ("partner", "the named partner (partner column), posted or not"),
+        ("matched", "in a mutual pair in that slot at the truthful report"),
+        ("pair_kwh", "the pair quantity served first at the truthful report "
+                     "(0 unless matched under preferences_first)"),
+        ("alloc0_full_kwh", "allocation at the truthful report, full "
+                            "engine"),
+        ("alloc0_base_kwh", "allocation at the truthful report, baseline"),
+        ("net_max_full_ct", "largest net gain over the grid, full engine, "
+                            "ct"),
+        ("net_max_base_ct", "largest net gain over the grid, baseline, ct"),
+        ("diff_ct", "net_max_full_ct - net_max_base_ct"),
+        ("delta_star_full", "maximiser delta* / claim, full engine"),
+        ("delta_star_base", "maximiser delta* / claim, baseline"),
     ),
 }
 

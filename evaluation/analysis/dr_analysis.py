@@ -1,10 +1,17 @@
 """DR2-DR5 over the recorded campaign runs (Chapter 3.4.3 -> Chapter 5).
 
     python dr_analysis.py [--runs DIR ...] [--dest DIR]
+                          [--full-cells CELL ...] [--compare-to DIR]
 
 `--runs` defaults to `evaluation/out`; `--dest` to
 `evaluation/out/analysis/<YYYYMMDD>-<short sha>`, with `-dirty` appended
 when the working tree has uncommitted changes.
+
+`--full-cells` names the block-1 cells the DR2 check of the full artifact
+(`dr2_full.py`) replays, all seeds each; the default is `dr2_full.CELLS`,
+and a subset is for development runs. `--compare-to` compares the tables
+this script wrote before that stage existed byte for byte with the files of
+the same name in DIR, after writing, and prints the result.
 
 **Read-only on run data.** The script never writes into a run directory,
 never appends to a manifest and never re-runs anything; everything it
@@ -17,6 +24,11 @@ otherwise only `checks.json` is written and the script exits 1 naming the
 failure. The other assertions (A6, the band reproduction, the census
 against the manifests) are written with the tables and make the exit code 1
 when one fails.
+
+The DR2 check of the full artifact runs after the existing DR2 stage. Its
+own hard checks (a missing cell or seed, the run preconditions, R4, R5, C1)
+stop that stage only: the `dr2_full_*` tables are then not written, the
+other tables are, and the exit code is 1.
 """
 import argparse
 import csv
@@ -39,6 +51,7 @@ import coalitions  # noqa: E402
 import columns  # noqa: E402
 import discovery  # noqa: E402
 import dr2  # noqa: E402
+import dr2_full  # noqa: E402
 import dr3  # noqa: E402
 import dr4  # noqa: E402
 import dr5  # noqa: E402
@@ -83,6 +96,15 @@ def parse_args(argv=None):
     parser.add_argument("--dest", default=None,
                         help="output directory (default out/analysis/"
                              "<date>-<sha>[-dirty])")
+    parser.add_argument("--full-cells", nargs="+", default=None,
+                        metavar="CELL",
+                        help="block-1 cells the DR2 check of the full "
+                             "artifact replays (default: "
+                             f"{' '.join(dr2_full.CELLS)})")
+    parser.add_argument("--compare-to", default=None, metavar="DIR",
+                        help="after writing, compare the tables that "
+                             "predate the full-artifact stage byte for byte "
+                             "with the files of the same name in DIR")
     return parser.parse_args(argv)
 
 
@@ -150,6 +172,36 @@ def write_table(dest: Path, name: str, rows: list) -> None:
         writer.writerows(rows)
 
 
+def compare_tables(dest: Path, other: Path, names) -> dict:
+    """name -> `identical`, or where `dest/<name>.csv` first parts from
+    `other/<name>.csv`. A regression guard, not a check: a difference is
+    printed, and it is for the reader to say whether it is one."""
+    out = {}
+    for name in names:
+        theirs = other / f"{name}.csv"
+        if not theirs.exists():
+            out[name] = f"missing in {other}"
+            continue
+        mine_bytes = (dest / f"{name}.csv").read_bytes()
+        theirs_bytes = theirs.read_bytes()
+        if mine_bytes == theirs_bytes:
+            out[name] = "identical"
+            continue
+        mine, their = mine_bytes.splitlines(), theirs_bytes.splitlines()
+        for number, (a, b) in enumerate(zip(mine, their), 1):
+            if a != b:
+                out[name] = (f"line {number}: "
+                             f"{a.decode('utf-8', 'replace')[:300]!r} != "
+                             f"{b.decode('utf-8', 'replace')[:300]!r}")
+                break
+        else:
+            out[name] = (f"line {min(len(mine), len(their)) + 1}: "
+                         f"{len(mine)} lines here, {len(their)} there"
+                         if len(mine) != len(their)
+                         else "same lines, different line endings")
+    return out
+
+
 def _json_default(value):
     if isinstance(value, (np.bool_,)):
         return bool(value)
@@ -192,12 +244,19 @@ def main(argv=None) -> int:
     print(f"{len(found.runs)} runs, {len(found.skipped)} directories skipped")
     for directory in found.multi_entry:
         print(f"  re-run appended, last manifest entry used: {directory}")
+    full_cells = tuple(args.full_cells or dr2_full.CELLS)
+    missing_full = dr2_full.missing_runs(found.runs, full_cells)
+    if missing_full:
+        # Said now, not only after DR2: the other tables are still written.
+        print(f"DR2 full artifact: missing {', '.join(missing_full)}; no "
+              f"dr2_full table will be written (--full-cells restricts the "
+              f"set)", file=sys.stderr)
 
     census, census_ok = [], []
     r2 = checks.R2()
     acc3, acc4, acc5 = dr3.DR3(), dr4.DR4(), dr5.DR5()
     acc6 = coalitions.Coalitions()
-    named, reference, incomplete = [], [], []
+    named, reference, incomplete, full_runs = [], [], [], []
     param_source = {}
     for number, run in enumerate(found.runs, 1):
         try:
@@ -217,6 +276,8 @@ def main(argv=None) -> int:
         named.extend(dr2.named_deviators(data))
         if run.cell == REFERENCE_CELL:
             reference.append(data)
+        if run.cell in full_cells:
+            full_runs.append(dr2_full.extract(data))
         if number % 20 == 0:
             print(f"  read {number}/{len(found.runs)} runs "
                   f"({time.perf_counter() - started:.0f}s)")
@@ -249,6 +310,10 @@ def main(argv=None) -> int:
     conditions = dr2.conditions(pop)
     band_table, band_ok = dr2.band_sensitivity(pop, cases, conditions)
     print(f"  DR2 done ({time.perf_counter() - started:.0f}s)")
+    full = dr2_full.run(full_runs, reference, cases, full_cells,
+                        err=lambda text: print(text, file=sys.stderr))
+    print(f"  DR2 full artifact done ({full.wall_sec:.0f}s of "
+          f"{time.perf_counter() - started:.0f}s)")
 
     results["dr2_band_calibrated_reproduces_main"] = {"passed": band_ok}
     results["census_agrees_with_manifests"] = {
@@ -260,6 +325,7 @@ def main(argv=None) -> int:
         "tolerance": 1e-5, "max_deviation_kwh": acc5.pair_kwh_max_dev,
         "served_first_rows_without_partner_row": acc5.partner_rows_missing}
     results.update(acc6.assertions())
+    results.update(full.checks)
 
     coalition_rows = acc6.table()
     notes = coalition_notes(coalition_rows)
@@ -271,6 +337,7 @@ def main(argv=None) -> int:
         "same_from_slot_csv_n_deviators": acc4.n_multi_column,
         "executed_slots": acc4.n_executed_slots,
         "vault_figure_for_comparison": 13212,
+        "dr2_full": full.findings,
     }
 
     tables = {
@@ -284,12 +351,21 @@ def main(argv=None) -> int:
         "dr5_preferences": acc5.preferences_table(),
         "coalitions": coalition_rows,
     }
+    preexisting = list(tables)
+    if full.tables is not None:
+        tables.update(full.tables)
     for name, rows in tables.items():
         write_table(dest, name, rows)
     (dest / "columns.md").write_text(columns.markdown(notes),
                                      encoding="utf-8")
     write_json(dest / "checks.json", {"checks": results,
                                       "findings": findings})
+    comparison = None
+    if args.compare_to:
+        comparison = compare_tables(dest, Path(args.compare_to), preexisting)
+        print(f"--compare-to {args.compare_to}:")
+        for name, verdict in comparison.items():
+            print(f"  {name}.csv: {verdict}")
 
     sha, dirty = script_state()
     write_json(dest / "manifest.json", {
@@ -311,6 +387,11 @@ def main(argv=None) -> int:
         "skipped": [{"path": p, "reason": why} for p, why in found.skipped],
         "checks_passed": {name: bool(result["passed"])
                           for name, result in results.items()},
+        "full_cells": list(full_cells),
+        "dr2_full_penalty_parameters": full.params,
+        "dr2_full_wall_sec": full.wall_sec,
+        "compare_to": ({"dir": str(args.compare_to), "tables": comparison}
+                       if comparison is not None else None),
         "wall_sec": round(time.perf_counter() - started, 1)})
 
     print_headlines(findings, tables)

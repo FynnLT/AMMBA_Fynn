@@ -159,12 +159,18 @@ def sweep(pop, idx, direction, band=None, chunk=4096) -> dict:
     return out
 
 
-def _net_at(pop, idx, rel, direction, band, base_utility):
-    return evaluate(pop, idx, rel, direction, band)["utility"] - base_utility
+def _net_at(pop, idx, rel, direction, band, base_utility, evaluate_fn=None):
+    evaluate_fn = evaluate_fn or evaluate
+    return evaluate_fn(pop, idx, rel, direction, band)["utility"] - base_utility
 
 
-def thresholds(pop, idx, direction, res, band=None) -> dict:
-    """delta_active, delta*, net_max, delta_zero and net(delta_active)."""
+def thresholds(pop, idx, direction, res, band=None, evaluate_fn=None) -> dict:
+    """delta_active, delta*, net_max, delta_zero and net(delta_active).
+
+    `evaluate_fn` is the engine the bisections call, `evaluate` unless
+    given; `dr2_full` passes its own with the same signature.
+    """
+    evaluate_fn = evaluate_fn or evaluate
     n = len(idx)
     rows = np.arange(n)
     u0 = res["u0"]
@@ -181,7 +187,8 @@ def thresholds(pop, idx, direction, res, band=None) -> dict:
         if not len(sel):
             break
         mid = 0.5 * (lo[sel] + hi[sel])
-        on = evaluate(pop, idx[sel], mid, direction, band)["penalty_raw"] > 0.0
+        on = evaluate_fn(pop, idx[sel], mid, direction,
+                         band)["penalty_raw"] > 0.0
         hi[sel] = np.where(on, mid, hi[sel])
         lo[sel] = np.where(on, lo[sel], mid)
     delta_active = np.where(has_active, hi, np.inf)
@@ -203,7 +210,8 @@ def thresholds(pop, idx, direction, res, band=None) -> dict:
         if not len(sel):
             break
         mid = 0.5 * (lo[sel] + hi[sel])
-        nonpos = _net_at(pop, idx[sel], mid, direction, band, u0[sel]) <= 0.0
+        nonpos = _net_at(pop, idx[sel], mid, direction, band, u0[sel],
+                         evaluate_fn) <= 0.0
         hi[sel] = np.where(nonpos, mid, hi[sel])
         lo[sel] = np.where(nonpos, lo[sel], mid)
     delta_zero = np.where(profitable, np.where(has_zero, hi, np.inf), 0.0)
@@ -213,7 +221,7 @@ def thresholds(pop, idx, direction, res, band=None) -> dict:
     if finite.any():
         sel = np.where(finite)[0]
         net_at_active[sel] = _net_at(pop, idx[sel], delta_active[sel],
-                                     direction, band, u0[sel])
+                                     direction, band, u0[sel], evaluate_fn)
 
     switched = res["regime"] != res["regime0"][:, None]
     return {"delta_active": delta_active, "delta_star": delta_star,

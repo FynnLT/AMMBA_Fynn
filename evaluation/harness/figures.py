@@ -73,6 +73,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.text import Text
 from matplotlib.ticker import FuncFormatter, NullFormatter
 
 HARNESS_DIR = Path(__file__).resolve().parent
@@ -93,12 +94,29 @@ C1, C2, C3 = "#2166ac", "#b2182b", "#7b3294"   # validated categorical set
 INK, MUTED, GRID = "#222222", "#6b6b6b", "#cccccc"
 STYLE = ((C1, "o", "-"), (C2, "s", "--"), (C3, "^", "-."))
 
+#: The width a figure is printed at in the thesis: the text width of the
+#: Chapter 5 document (A4, 2.5 cm margins), measured on the embedded images
+#: of `Evaluation 2026-09-29 v2` on 30.09.2026. Figure 5.5 is set narrower.
+#: A figure drawn wider than this is scaled down by Word, and every font size
+#: with it -- Figure 5.3 printed at about 5 pt that way. Figures are therefore
+#: drawn at their print width, and `save` reports the smallest text in print.
+TEXT_WIDTH_CM = 16.0
+TEXT_WIDTH_IN = TEXT_WIDTH_CM / 2.54
+
 plt.rcParams.update({
     # Arial on the machine the thesis is written on, DejaVu as the fallback
     # anywhere else. A "findfont: Font family 'Arial' not found" on a run is
     # therefore a real signal -- the figures of that run are not set in the
     # font of the surrounding text -- and not warning noise to ignore.
     "font.family": ["Arial", "DejaVu Sans"],
+    # The Greek letters of the axis labels (gamma, eta) in the same face as the
+    # text. Without these four lines mathtext sets them in DejaVu even where
+    # Arial is installed. Where it is not, the same findfont warning applies.
+    "mathtext.fontset": "custom",
+    "mathtext.rm": "Arial",
+    "mathtext.it": "Arial:italic",
+    "mathtext.bf": "Arial:bold",
+    "mathtext.cal": "Arial:italic",
     "font.size": 9,
     "axes.titlesize": 9,
     "axes.labelsize": 9,
@@ -304,13 +322,42 @@ def clipped(means, sds, floor=1e-3):
     return [lower, list(sds)]
 
 
-def save(fig, name):
+def print_size(fig, print_width_cm=TEXT_WIDTH_CM):
+    """(width cm, height cm, smallest text in pt) of a saved figure in print.
+
+    The saved size is the tight bounding box plus the default padding of
+    `savefig`; printing it at `print_width_cm` scales every font by the same
+    factor. Only visible, non-empty text counts.
+    """
+    renderer = fig.canvas.get_renderer()
+    box = fig.get_tightbbox(renderer)
+    pad = 2 * plt.rcParams["savefig.pad_inches"]
+    width_in, height_in = box.width + pad, box.height + pad
+    scale = (print_width_cm / 2.54) / width_in
+    sizes = [t.get_fontsize() for t in fig.findobj(Text)
+             if t.get_visible() and t.get_text().strip()]
+    return (width_in * 2.54, height_in * 2.54,
+            min(sizes) * scale if sizes else None)
+
+
+def save(fig, name, print_width_cm=TEXT_WIDTH_CM, rect=None):
+    """Write PNG and PDF, and report how the figure prints at its width.
+
+    `rect` is passed to `tight_layout` for figures that place text outside
+    their axes (column headings, a shared axis label).
+    """
     FIG.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout()
+    if rect is None:
+        fig.tight_layout()
+    else:
+        fig.tight_layout(rect=rect)
     for suffix in ("png", "pdf"):
         fig.savefig(FIG / f"{name}.{suffix}", bbox_inches="tight")
+    width, height, smallest = print_size(fig, print_width_cm)
     plt.close(fig)
-    print(f"  wrote {name}.png / .pdf")
+    print(f"  wrote {name}.png / .pdf -- saved {width:.1f} x {height:.1f} cm; "
+          f"printed at {print_width_cm:g} cm the smallest text is "
+          f"{smallest:.1f} pt")
 
 
 def _bars(ax, groups, labels, values, errors, ylabel, width=0.36):
@@ -400,7 +447,8 @@ def fig1(data):
     prefs = [f"prefs_first_d0{d}" for d in ("20", "50", "80")]
     pro = [f"pro_rata_first_d0{d}" for d in ("20", "50", "80")]
 
-    fig, axes = plt.subplots(1, 3, figsize=(9.2, 3.1))
+    # At the text width (Figure 5.1 printed at about 6 pt from 9.2 in).
+    fig, axes = plt.subplots(1, 3, figsize=(TEXT_WIDTH_IN, 2.9))
     ax = axes[0]
     for cells, label, (colour, marker, line) in ((prefs, "preferences first", STYLE[0]),
                                                  (pro, "pro rata first", STYLE[1])):
@@ -409,8 +457,8 @@ def fig1(data):
                     linestyle=line, markersize=5, linewidth=1.6, capsize=2,
                     label=label)
     ax.set_xlabel("named share"); ax.set_ylabel("cleared pair energy [kWh/week]")
-    ax.set_title("(a) Energy allocated to preferred pairs")
-    ax.legend(loc="upper left")
+    ax.set_title("(a) Energy allocated\nto preferred pairs")
+    ax.legend(loc="upper left", fontsize=8, handlelength=1.6)
 
     for axis, cells, title in ((axes[1], prefs, "(b) preferences first"),
                                (axes[2], pro, "(c) pro rata first")):
@@ -423,7 +471,8 @@ def fig1(data):
         # Fill rates are bounded by 1, so the headroom is free and the legend
         # never has to sit on a bar.
         axis.set_ylim(0, 1.18)
-    axes[1].legend(loc="upper center", ncol=2, columnspacing=1.2)
+    axes[1].legend(loc="upper center", ncol=2, fontsize=8, handlelength=1.2,
+                   columnspacing=0.8)
     save(fig, "fig1_preference_density")
 
 
@@ -453,7 +502,8 @@ def fig3(data):
     # One y-axis across both panels: the two supply mixes are measured in the
     # same unit, and separate scales would make the smaller one look like the
     # larger one's equal.
-    fig, axes = plt.subplots(1, 2, figsize=(7.6, 3.4), sharey=True)
+    # At the text width (printed at about 6.3 pt from 7.6 in).
+    fig, axes = plt.subplots(1, 2, figsize=(TEXT_WIDTH_IN, 3.1), sharey=True)
     for axis, cells, title in (
             (axes[0], ("multipliers_on", "multipliers_on_additive"),
              "(a) Reference window: no slot carries both types"),
@@ -580,7 +630,8 @@ def fig6(data):
     cells = ("b2_eta000", "b2_eta005", "b2_sell_s25", "b2_eta015", "b2_eta025")
     etas = [0.00, 0.05, 0.10, 0.15, 0.25]
     ticks = ["0.00", "0.05", "0.10", "0.15", "0.25"]
-    fig, axes = plt.subplots(1, 2, figsize=(7.6, 3.3))
+    # At the text width (printed at about 6.3 pt from 7.6 in).
+    fig, axes = plt.subplots(1, 2, figsize=(TEXT_WIDTH_IN, 3.0))
 
     means, sds = points(data, cells, "sum_withheld_kwh")
     axes[0].errorbar(etas, means, yerr=sds, color=C1, marker="o", linestyle="-",
@@ -657,7 +708,7 @@ def fig7(data):
     ax.set_ylabel("shortfall penalties [ct/week]")
     ax.set_title("Who pays when $\\gamma$ rises")
     ax.legend(loc="upper left", fontsize=8)
-    save(fig, "fig7_gamma")
+    save(fig, "fig7_gamma", print_width_cm=12.0)
 
 
 #: The eight cases in the order of Table 5.3 (= the rows of Table 4.2):
@@ -684,6 +735,11 @@ def fig8(_data):
     that only forgoes margin reads as a line of slope -1, an over-report that
     nothing prices as one of slope +1. The thresholds marked in the two
     short-side seller panels are the medians `dr2_cases.csv` reports.
+
+    Drawn for a portrait page at the text width: four rows by two columns,
+    sellers left (cases 1-4) and buyers right (cases 5-8), so each row pairs
+    the same side role and direction. The 2 x 4 version of 24.09. was 24 cm
+    wide and printed at about 5 pt once Word scaled it to the text width.
     """
     curves_path = source("analysis", "analysis/*", "dr2_curves.csv",
                          accept=_checks_passed)
@@ -693,8 +749,11 @@ def fig8(_data):
     cases = {row["case"]: row for row in read_rows(curves_path.parent / "dr2_cases.csv")
              if row["type"] == "all"}
 
-    fig, axes = plt.subplots(2, 4, figsize=(9.4, 5.0), sharex=True, sharey=True)
-    for axis, (case, number, title) in zip(axes.flat, DR2_CASES):
+    fig, axes = plt.subplots(4, 2, figsize=(TEXT_WIDTH_IN, 7.7),
+                             sharex=True, sharey=True)
+    # Column-major: the four seller cases down the left, the buyers down the right.
+    panels = [axes[row][col] for col in range(2) for row in range(4)]
+    for axis, (case, number, title) in zip(panels, DR2_CASES):
         rows = sorted(curves[case], key=lambda r: float(r["delta_rel"]))
         delta = [float(r["delta_rel"]) for r in rows]
         axis.axhline(0.0, color=INK, linewidth=0.7, zorder=1)
@@ -704,24 +763,24 @@ def fig8(_data):
         axis.plot(delta, [100 * float(r["net_rel_median"]) for r in rows],
                   color=C1, linestyle="-", linewidth=1.8, zorder=3,
                   label="median")
-        axis.set_title(f"({number}) {title}\nn = {int(rows[0]['n']):,}",
-                       fontsize=8)
+        axis.set_title(f"({number}) {title}, n = {int(rows[0]['n']):,}",
+                       fontsize=8.5)
 
     def mark(axis, x, text, y):
         axis.axvline(x, color=MUTED, linestyle=":", linewidth=1.0, zorder=1)
-        axis.text(x + 0.012, y, text, fontsize=7, color=MUTED, va="center")
+        axis.text(x + 0.012, y, text, fontsize=8, color=MUTED, va="center")
 
     withhold, over = cases["seller_short_withhold"], cases["seller_short_overreport"]
     mark(axes[0][0], float(withhold["delta_active_rel_median"]),
          f"penalty from {float(withhold['delta_active_rel_median']):.3f}", 44)
-    mark(axes[0][1], float(over["delta_active_rel_median"]),
+    mark(axes[1][0], float(over["delta_active_rel_median"]),
          f"penalty from {float(over['delta_active_rel_median']):.3f}", 44)
-    mark(axes[0][1], float(over["delta_zero_rel_median"]),
-         f"no gain from {float(over['delta_zero_rel_median']):.3f}", 30)
+    mark(axes[1][0], float(over["delta_zero_rel_median"]),
+         f"no gain from {float(over['delta_zero_rel_median']):.3f}", 26)
     # The long side is still rising where the tested domain ends: a lower
     # bound, which the figure says rather than leaves to the caption.
-    for axis in (axes[0][3], axes[1][3]):
-        axis.text(0.49, -38, "still rising\nat 0.5", fontsize=7, color=MUTED,
+    for axis in (axes[3][0], axes[3][1]):
+        axis.text(0.49, -40, "still rising\nat 0.5", fontsize=8, color=MUTED,
                   ha="right", va="center")
 
     axes[0][0].set_ylim(-75, 58)
@@ -729,13 +788,19 @@ def fig8(_data):
     axes[0][0].set_xlim(0.0, 0.5)
     axes[0][0].set_xticks([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
     axes[0][0].set_xticklabels(["0", "0.1", "0.2", "0.3", "0.4", "0.5"])
-    axes[0][0].set_ylabel("sellers\nnet gain [% of truthful payoff]")
-    axes[1][0].set_ylabel("buyers\nnet gain [% of truthful payoff]")
-    for axis in axes[1]:
+    for axis in axes[3]:
         axis.set_xlabel("deviation [share of claim]")
+    # Column headings and one shared y-label, placed in the margin that
+    # `rect` keeps free in `save`.
+    fig.text(0.29, 0.995, "Sellers", ha="center", va="top", fontsize=9.5,
+             fontweight="bold")
+    fig.text(0.77, 0.995, "Buyers", ha="center", va="top", fontsize=9.5,
+             fontweight="bold")
+    fig.text(0.005, 0.5, "net gain [% of truthful payoff]", rotation=90,
+             ha="left", va="center", fontsize=9)
     # Panel 3 has nothing above the zero line; the legend sits there.
-    axes[0][2].legend(loc="upper right", fontsize=7.5)
-    save(fig, "fig8_dr2_curves")
+    axes[2][0].legend(loc="upper right", fontsize=8)
+    save(fig, "fig8_dr2_curves", rect=(0.03, 0.0, 1.0, 0.975))
 
 
 def fig9(_data):
@@ -762,7 +827,8 @@ def fig9(_data):
     medians = [statistics.median(cycles[n]) for n in ns]
     per_order = [m / n for n, m in zip(ns, medians) if n >= 50]
 
-    fig, axes = plt.subplots(1, 2, figsize=(8.2, 3.3))
+    # At the text width (Figure 5.7 printed at about 5.4 pt from 8.2 in).
+    fig, axes = plt.subplots(1, 2, figsize=(TEXT_WIDTH_IN, 3.1))
 
     ax = axes[0]
     xs, ys = zip(*n_axis)
@@ -802,10 +868,10 @@ def fig9(_data):
             linestyle=":", linewidth=1.0, zorder=1)
     # The guide's label sits in the empty lower right, not on the data.
     ax.text(0.97, 0.05, f"dotted: {1000 * rate:.2f} ms per order \u00d7 N\n"
-            f"(median for N \u2265 50)", transform=ax.transAxes, fontsize=7,
+            f"(median for N \u2265 50)", transform=ax.transAxes, fontsize=7.5,
             color=MUTED, ha="right", va="bottom")
     ax.axhline(900, color=MUTED, linestyle="-.", linewidth=0.9, zorder=1)
-    ax.text(ns[0], 900 * 1.35, "slot length, 900 s", fontsize=7, color=MUTED)
+    ax.text(ns[0], 900 * 1.35, "slot length, 900 s", fontsize=7.5, color=MUTED)
     for n, m in zip(ns, medians):
         if n == 100:
             ax.text(n * 1.4, m / 2.4, f"{m:,.2f} s", fontsize=7.5, color=INK,

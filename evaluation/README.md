@@ -82,6 +82,24 @@ importable.
 runs: two ways of setting the same thing is how a manifest stops describing the
 run it names.
 
+### The combined IR cells
+
+```bash
+cd evaluation/harness
+python campaign.py --block ir          # 6 cells x 5 seeds; --resume after an abort
+```
+
+`campaign.ir_grid()` (D-91) takes block-1 cells with preferences and the
+energy-origin adjustment (`multipliers_on`, `mult_overlap_*`) and executes them
+under block 2's accidental layer, so a levy or a bonus and a penalty can fall on
+the same participant-slot; one cell moves the levy to its cap, two move eta or
+gamma to the sweep points where honest sellers violate IR without preferences.
+`analysis/dr_analysis.py` evaluates the group in its own stage
+(`analysis/ir_combined.py`, tables `ir_combined_*`) and keeps it out of every
+other table. Its hard checks need the block-1 source runs in the same run set
+(the group clears exactly their markets) and runs recorded at a commit whose
+`campaign.py` defines `ir_grid` — run the group from a clean, committed tree.
+
 ### N-curve
 
 ```bash

@@ -434,16 +434,17 @@ async def test_the_stage_writes_its_tables_and_leaves_the_others_alone(
                                      encoding="utf-8")))
     assert {r["group"] for r in cases} >= {"all", "matched", "unmatched"}
 
-    # The same runs again: every pre-existing table byte for byte.
+    # The same runs again: every table byte for byte, the 14 that predate
+    # this stage and its own three.
     capsys.readouterr()
     second = tmp_path / "second"
     dr_analysis.main(["--runs", str(runs), "--dest", str(second),
                       "--full-cells", "multipliers_on",
                       "--compare-to", str(first)])
     out = capsys.readouterr().out
-    for table in ("census", "dr2_cases", "coalitions"):
+    for table in ("census", "dr2_cases", "coalitions") + F.TABLES:
         assert f"  {table}.csv: identical" in out
-    assert out.count(": identical") == 14
+    assert out.count(": identical") == 14 + len(F.TABLES)
     manifest = json.loads((second / "manifest.json").read_text(
         encoding="utf-8"))
     assert set(manifest["compare_to"]["tables"].values()) == {"identical"}

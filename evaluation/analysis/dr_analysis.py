@@ -9,9 +9,9 @@ when the working tree has uncommitted changes.
 
 `--full-cells` names the block-1 cells the DR2 check of the full artifact
 (`dr2_full.py`) replays, all seeds each; the default is `dr2_full.CELLS`,
-and a subset is for development runs. `--compare-to` compares the tables
-this script wrote before that stage existed byte for byte with the files of
-the same name in DIR, after writing, and prints the result.
+and a subset is for development runs. `--compare-to` compares every table
+this script wrote, except the `ir_combined_*` ones, byte for byte with the
+file of the same name in DIR, after writing, and prints the result.
 
 **Read-only on run data.** The script never writes into a run directory,
 never appends to a manifest and never re-runs anything; everything it
@@ -29,6 +29,13 @@ The DR2 check of the full artifact runs after the existing DR2 stage. Its
 own hard checks (a missing cell or seed, the run preconditions, R4, R5, C1)
 stop that stage only: the `dr2_full_*` tables are then not written, the
 other tables are, and the exit code is 1.
+
+The combined IR cells (`ir_*`, D-91) are their own stage
+(`ir_combined.py`). A group run is handed to it before any other
+accumulator sees it, so every other table reads as if the group did not
+exist. The stage runs after the DR2 full-artifact stage, with the same rule:
+its hard checks G1-G6 stop it only. Without a group run it is skipped and
+writes nothing.
 """
 import argparse
 import csv
@@ -55,6 +62,7 @@ import dr2_full  # noqa: E402
 import dr3  # noqa: E402
 import dr4  # noqa: E402
 import dr5  # noqa: E402
+import ir_combined  # noqa: E402
 import replay as R  # noqa: E402
 
 EVALUATION_DIR = ANALYSIS_DIR.parent
@@ -102,9 +110,9 @@ def parse_args(argv=None):
                              "artifact replays (default: "
                              f"{' '.join(dr2_full.CELLS)})")
     parser.add_argument("--compare-to", default=None, metavar="DIR",
-                        help="after writing, compare the tables that "
-                             "predate the full-artifact stage byte for byte "
-                             "with the files of the same name in DIR")
+                        help="after writing, compare every table except "
+                             "the ir_combined_* ones byte for byte with the "
+                             "files of the same name in DIR")
     return parser.parse_args(argv)
 
 
@@ -182,6 +190,9 @@ def compare_tables(dest: Path, other: Path, names) -> dict:
         if not theirs.exists():
             out[name] = f"missing in {other}"
             continue
+        if not (dest / f"{name}.csv").exists():
+            out[name] = f"not written in {dest}"
+            continue
         mine_bytes = (dest / f"{name}.csv").read_bytes()
         theirs_bytes = theirs.read_bytes()
         if mine_bytes == theirs_bytes:
@@ -256,6 +267,8 @@ def main(argv=None) -> int:
     r2 = checks.R2()
     acc3, acc4, acc5 = dr3.DR3(), dr4.DR4(), dr5.DR5()
     acc6 = coalitions.Coalitions()
+    acc_ir = ir_combined.IRCombined(
+        active=any(ir_combined.belongs(r.cell) for r in found.runs))
     named, reference, incomplete, full_runs = [], [], [], []
     param_source = {}
     for number, run in enumerate(found.runs, 1):
@@ -265,19 +278,26 @@ def main(argv=None) -> int:
             incomplete.append(str(exc))
             continue
         param_source[run.run_id] = data.param_source
-        row, ok = census_row(data)
-        census.append(row)
-        census_ok.append((run.run_id, ok))
-        r2.add(data)
-        acc3.add(data)
-        acc4.add(data)
-        acc5.add(data)
-        acc6.add(data)
-        named.extend(dr2.named_deviators(data))
-        if run.cell == REFERENCE_CELL:
-            reference.append(data)
-        if run.cell in full_cells:
-            full_runs.append(dr2_full.extract(data))
+        if ir_combined.belongs(run.cell):
+            # D-91: the combined IR cells go to their own stage before any
+            # accumulator below sees them, so no existing table moves.
+            acc_ir.add(data, census_row(data)[0])
+        else:
+            row, ok = census_row(data)
+            census.append(row)
+            census_ok.append((run.run_id, ok))
+            r2.add(data)
+            acc3.add(data)
+            acc4.add(data)
+            acc5.add(data)
+            acc6.add(data)
+            named.extend(dr2.named_deviators(data))
+            if run.cell == REFERENCE_CELL:
+                reference.append(data)
+            if run.cell in full_cells:
+                full_runs.append(dr2_full.extract(data))
+            # Keeps only the block-1 counterparts G5 compares with.
+            acc_ir.observe(data)
         if number % 20 == 0:
             print(f"  read {number}/{len(found.runs)} runs "
                   f"({time.perf_counter() - started:.0f}s)")
@@ -314,6 +334,9 @@ def main(argv=None) -> int:
                         err=lambda text: print(text, file=sys.stderr))
     print(f"  DR2 full artifact done ({full.wall_sec:.0f}s of "
           f"{time.perf_counter() - started:.0f}s)")
+    ir = acc_ir.run(err=lambda text: print(text, file=sys.stderr))
+    print(f"  IR combined cells done ({ir.wall_sec:.0f}s of "
+          f"{time.perf_counter() - started:.0f}s)")
 
     results["dr2_band_calibrated_reproduces_main"] = {"passed": band_ok}
     results["census_agrees_with_manifests"] = {
@@ -326,6 +349,7 @@ def main(argv=None) -> int:
         "served_first_rows_without_partner_row": acc5.partner_rows_missing}
     results.update(acc6.assertions())
     results.update(full.checks)
+    results.update(ir.checks)
 
     coalition_rows = acc6.table()
     notes = coalition_notes(coalition_rows)
@@ -338,6 +362,7 @@ def main(argv=None) -> int:
         "executed_slots": acc4.n_executed_slots,
         "vault_figure_for_comparison": 13212,
         "dr2_full": full.findings,
+        "ir_combined": ir.findings,
     }
 
     tables = {
@@ -351,9 +376,10 @@ def main(argv=None) -> int:
         "dr5_preferences": acc5.preferences_table(),
         "coalitions": coalition_rows,
     }
-    preexisting = list(tables)
     if full.tables is not None:
         tables.update(full.tables)
+    if ir.tables is not None:
+        tables.update(ir.tables)
     for name, rows in tables.items():
         write_table(dest, name, rows)
     (dest / "columns.md").write_text(columns.markdown(notes),
@@ -362,7 +388,14 @@ def main(argv=None) -> int:
                                       "findings": findings})
     comparison = None
     if args.compare_to:
-        comparison = compare_tables(dest, Path(args.compare_to), preexisting)
+        # Every table but the group's, including those DIR has and this
+        # run did not write: a stage that stopped here is a difference too.
+        other = Path(args.compare_to)
+        compared = [name for name in tables if not ir_combined.is_table(name)]
+        compared += sorted(path.stem for path in other.glob("*.csv")
+                           if path.stem not in tables
+                           and not ir_combined.is_table(path.stem))
+        comparison = compare_tables(dest, other, compared)
         print(f"--compare-to {args.compare_to}:")
         for name, verdict in comparison.items():
             print(f"  {name}.csv: {verdict}")
@@ -390,6 +423,10 @@ def main(argv=None) -> int:
         "full_cells": list(full_cells),
         "dr2_full_penalty_parameters": full.params,
         "dr2_full_wall_sec": full.wall_sec,
+        "ir_combined": {"cells": ir.cells, "repo_sha": ir.repo_sha,
+                        "n_runs": len(acc_ir.runs),
+                        "tables_written": ir.tables is not None,
+                        "wall_sec": ir.wall_sec},
         "compare_to": ({"dir": str(args.compare_to), "tables": comparison}
                        if comparison is not None else None),
         "wall_sec": round(time.perf_counter() - started, 1)})

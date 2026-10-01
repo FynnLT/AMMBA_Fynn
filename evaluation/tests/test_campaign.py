@@ -46,10 +46,14 @@ def test_five_seeds_per_cell_recorded_individually():
     # configuration with one parameter moved, but they are their own group
     # and must not collide with the cells they are read against.
     sweep = campaign.cells("sweep")
+    combined = campaign.cells("ir")
     assert not {s.cell for s in block1} & {s.cell for s in block2}
     assert not {s.cell for s in sweep} & ({s.cell for s in block1}
                                           | {s.cell for s in block2})
-    assert len(campaign.cells()) == 95 + 70 + 60 + 6
+    assert not {s.cell for s in combined} & ({s.cell for s in block1}
+                                             | {s.cell for s in block2}
+                                             | {s.cell for s in sweep})
+    assert len(campaign.cells()) == 95 + 70 + 60 + 30 + 6
 
 
 def test_block_two_executes_and_block_one_does_not():
@@ -292,6 +296,99 @@ def test_no_sweep_cell_that_already_has_runs_lost_its_name():
     # And the only names that are new are the two this task adds.
     assert sorted(set(grid) - set(already_run)) == ["b2_sell_s25_g150",
                                                     "b2_sell_s25_g200"]
+
+
+# ------------------------------------------------- the combined IR cells
+
+#: Each combined cell, its block-1 source and the one parameter it moves
+#: beyond the execution part. Written out rather than read off the grid
+#: under test.
+IR_CELLS = {
+    "ir_ref_mult": ("multipliers_on", None),
+    "ir_overlap_mult": ("mult_overlap_multiplicative", None),
+    "ir_overlap_add": ("mult_overlap_additive", None),
+    "ir_overlap_mult_levy020": ("mult_overlap_multiplicative", "grey_levy"),
+    "ir_overlap_mult_eta005": ("mult_overlap_multiplicative", "eta_relative"),
+    "ir_overlap_mult_g150": ("mult_overlap_multiplicative", "gamma"),
+}
+
+
+def test_the_combined_ir_cells_are_six_cells_at_five_seeds():
+    """D-91. Six cells x five seeds, and the `ir_` prefix is theirs alone:
+    the analysis decides group membership by it."""
+    specs = campaign.cells("ir")
+    assert len(specs) == 30
+    assert len({s.run_id for s in specs}) == 30
+
+    by_cell = {}
+    for spec in specs:
+        by_cell.setdefault(spec.cell, []).append(spec.seed)
+    assert sorted(by_cell) == sorted(IR_CELLS)
+    for cell, seeds in by_cell.items():
+        assert cell.startswith("ir_"), cell
+        assert seeds == list(campaign.SEEDS), cell
+
+    others = (campaign.cells(1) + campaign.cells(2) + campaign.cells("sweep")
+              + campaign.calibration_cells())
+    assert not [s.cell for s in others if s.cell.startswith("ir_")]
+
+    assert campaign.parse_block(["campaign.py", "--block", "ir"]) == "ir"
+
+
+def test_every_combined_cell_executes_the_accidental_layer_only():
+    for spec in campaign.cells("ir"):
+        assert spec.execute is True, spec.cell
+        assert spec.deviation == {"arm": "none", "share": 0.0, "k": 0,
+                                  "sigma": campaign.SIGMA,
+                                  "seed": campaign.DEVIATION_SEED}, spec.cell
+
+
+def test_each_combined_cell_moves_only_the_documented_parameter():
+    """Against its block-1 source: `execute`, `gamma`, `eta_relative` and
+    `deviation` are the execution part, and at most one more parameter
+    moves -- `grey_levy` inside the preferences, or gamma, or eta."""
+    sources = {s.cell: s for s in campaign.cells(1) if s.seed == 0}
+    by_cell = {s.cell: s for s in campaign.cells("ir") if s.seed == 0}
+    default_gamma = campaign.execution_gamma()
+
+    def without(spec, *keys):
+        data = spec.config()
+        for key in ("cell",) + keys:
+            data.pop(key, None)
+        return json.dumps(data, sort_keys=True)
+
+    for name, (source_name, moved) in IR_CELLS.items():
+        spec, source = by_cell[name], sources[source_name]
+        execution = ("execute", "gamma", "eta_relative", "deviation")
+        if moved == "grey_levy":
+            assert without(spec, *execution, "preferences") == \
+                without(source, *execution, "preferences"), name
+            assert spec.preferences["grey_levy"] == campaign.LEVY_CAP == 0.20
+            assert source.preferences["grey_levy"] == campaign.GREY_LEVY
+            assert {k: v for k, v in spec.preferences.items()
+                    if k != "grey_levy"} == \
+                {k: v for k, v in source.preferences.items()
+                 if k != "grey_levy"}, name
+        else:
+            assert without(spec, *execution) == without(source, *execution), \
+                name
+            assert spec.preferences == source.preferences, name
+
+        assert source.execute is False and source.gamma is None
+        assert spec.gamma == (campaign.IR_GAMMA_STRESS if moved == "gamma"
+                              else default_gamma), name
+        assert spec.eta_relative == (campaign.IR_ETA_STRESS
+                                     if moved == "eta_relative"
+                                     else campaign.ETA_RELATIVE), name
+
+    # The stress points are the sweep's, not new ones.
+    assert campaign.IR_ETA_STRESS == 0.05 and \
+        campaign.IR_ETA_STRESS in campaign.SWEEP_ETAS
+    assert campaign.IR_GAMMA_STRESS == 1.5 and \
+        campaign.IR_GAMMA_STRESS in campaign.SWEEP_GAMMAS
+    # And building the group leaves block 1 untouched.
+    assert campaign.block1_grid()["mult_overlap_multiplicative"][
+        "preferences"]["grey_levy"] == campaign.GREY_LEVY
 
 
 def test_the_density_cells_differ_in_nothing_but_the_two_shares():

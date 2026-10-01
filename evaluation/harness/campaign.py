@@ -255,6 +255,17 @@ SWEEP_GAMMAS = (1.1, 1.5, 2.0, 3.0)
 SWEEP_ETAS = (0.00, 0.05, 0.15, 0.25)
 
 
+# ------------------------------------------------- the combined IR cells
+
+# D-91. The two penalty settings the combined IR cells are stressed at.
+# Table 5.5: the deadband nearest the reference at which honest sellers
+# violate IR without preferences (`b2_eta005`, 81 seller-slots).
+IR_ETA_STRESS = 0.05
+# Table 5.6: the first gamma above the reference at which they do
+# (`b2_sell_s25_g150`, 9 seller-slots).
+IR_GAMMA_STRESS = 1.5
+
+
 def execution_gamma() -> float:
     """The execution node's own configured gamma, read rather than restated.
 
@@ -484,6 +495,71 @@ def sweep_grid() -> dict:
     return grid
 
 
+def ir_grid() -> dict:
+    """The combined IR cells: 6 cells, block 1's preference and origin
+    configuration executed under block 2's accidental layer (D-91).
+
+    Individual rationality was measured on two halves of the artifact until
+    now: block 1 runs the preference-first allocation and the origin
+    adjustment without executing, block 2 and the sweep execute without
+    preferences. These cells run both at once, so a gray levy or a green
+    bonus and a penalty can fall on the same participant-slot.
+
+    Every cell is a block-1 cell taken from `block1_grid()` as it stands,
+    plus the execution part block 2's `b2_noise_only` runs with -- the
+    accidental layer at the campaign `SIGMA`, no strategic deviator, `gamma`
+    read off the execution node and the reference `ETA_RELATIVE` -- plus at
+    most one moved parameter:
+
+    * `ir_ref_mult` -- `multipliers_on`, nothing moved. Preferences first,
+      multiplicative levy, reference window.
+    * `ir_overlap_mult` / `ir_overlap_add` -- the two D-83 overlap cells,
+      nothing moved. On the reference window no bonus is ever paid (see
+      `GREEN_MULTIPLIER`), so this is the only place the bonus meets the
+      penalties; the additive cell lets the statement cover both
+      formulations.
+    * `ir_overlap_mult_levy020` -- `grey_levy` at `LEVY_CAP`: the worst case
+      of Eq. (4.8) under the cap, on the window with the lowest gray prices.
+    * `ir_overlap_mult_eta005` / `ir_overlap_mult_g150` -- the penalty
+      layer at `IR_ETA_STRESS` and `IR_GAMMA_STRESS`, where honest sellers
+      violate IR without preferences: does the adjustment add to them?
+
+    Clearing does not depend on execution -- the harness deviates after
+    clearing, and the accidental layer draws from the clearing response --
+    so each cell clears exactly the markets of its block-1 source at the
+    same seed. The analysis asserts that (G5); nothing here re-runs a
+    block-1 cell.
+    """
+    block1 = block1_grid()
+    gamma = execution_gamma()
+
+    def cell(source, *, grey_levy=None, **moved):
+        entry = {**block1[source],
+                 "execute": True, "gamma": gamma,
+                 "eta_relative": ETA_RELATIVE,
+                 "deviation": {"arm": deviations.NONE, "share": 0.0, "k": 0,
+                               "sigma": SIGMA, "seed": DEVIATION_SEED}}
+        if grey_levy is not None:
+            # A new dict: the source cell's preferences stay as they are.
+            entry["preferences"] = {**entry["preferences"],
+                                    "grey_levy": grey_levy}
+        entry.update(moved)
+        return entry
+
+    overlap = "mult_overlap_multiplicative"
+    return {
+        "ir_ref_mult": cell("multipliers_on"),
+        "ir_overlap_mult": cell(overlap),
+        "ir_overlap_add": cell("mult_overlap_additive"),
+        f"ir_overlap_mult_levy{pct(LEVY_CAP):03d}": cell(
+            overlap, grey_levy=LEVY_CAP),
+        f"ir_overlap_mult_eta{pct(IR_ETA_STRESS):03d}": cell(
+            overlap, eta_relative=IR_ETA_STRESS),
+        f"ir_overlap_mult_g{pct(IR_GAMMA_STRESS):03d}": cell(
+            overlap, gamma=IR_GAMMA_STRESS),
+    }
+
+
 def _fit_module():
     """`calibration/fit.py`, resolved relative to this file.
 
@@ -533,9 +609,9 @@ def calibration_cells() -> list:
 def cells(block=None) -> list:
     """The campaign grid: every cell at all five seeds.
 
-    `block` selects a group -- 1, 2, "sweep", "calibration", or None for the
-    union. The first cell of block 1 is the delta baseline itself, so it is
-    produced by the same code path as everything it is subtracted from.
+    `block` selects a group -- 1, 2, "sweep", "ir", "calibration", or None
+    for the union. The first cell of block 1 is the delta baseline itself, so
+    it is produced by the same code path as everything it is subtracted from.
     """
     if block == "calibration":
         return calibration_cells()
@@ -546,6 +622,8 @@ def cells(block=None) -> list:
         grid.update(block2_grid())
     if block in (None, "sweep"):
         grid.update(sweep_grid())
+    if block in (None, "ir"):
+        grid.update(ir_grid())
     specs = [spec_for(cell, seed, **overrides)
              for cell, overrides in grid.items() for seed in SEEDS]
     if block is None:
@@ -624,16 +702,16 @@ def report(results) -> None:
 
 
 def parse_block(argv) -> object:
-    """`--block 1`, `--block 2`, `--block sweep`, `--calibration`, default
-    all."""
+    """`--block 1`, `--block 2`, `--block sweep`, `--block ir`,
+    `--calibration`, default all."""
     if "--calibration" in argv:
         return "calibration"
     if "--block" in argv:
         value = argv[argv.index("--block") + 1]
-        if value in ("calibration", "sweep"):
+        if value in ("calibration", "sweep", "ir"):
             return value
         if value not in ("1", "2"):
-            raise SystemExit(f"--block takes 1, 2, sweep or calibration, "
+            raise SystemExit(f"--block takes 1, 2, sweep, ir or calibration, "
                              f"not {value!r}")
         return int(value)
     return None
@@ -688,6 +766,7 @@ async def main(block=None, out_dir=None):
         specs = resume(specs, out_dir)
     n_cells = len({spec.cell for spec in specs})
     name = {1: "block 1", 2: "block 2", "sweep": "the gamma/eta sweep",
+            "ir": "the combined IR cells",
             "calibration": "calibration"}.get(block, "all blocks")
     print(f"campaign ({name}): {len(specs)} runs over {n_cells} cells, "
           f"one process each")

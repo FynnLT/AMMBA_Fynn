@@ -46,6 +46,23 @@ READINGS = (
     "Block 1 was not executed, so gamma and eta_relative are the reference "
     "setting (1.1 / 0.10, from b2_noise_off; `checks.json` names the "
     "source). `profitable` means net_max > 1e-6 ct, as in dr2_cases.",
+    "The ir_combined_* tables evaluate the combined IR cells "
+    "(`campaign.ir_grid()`, D-91): block 1's preference-first allocation and "
+    "origin adjustment, executed under the accidental layer at sigma = 0.05, "
+    "and kept out of every other table. Per area row, from `dr3.realised`: "
+    "adj = (r_seller - p) q for sellers (negative for the grey levy, positive "
+    "for the green bonus), 0 for buyers; u_no_adj = u - adj, the row settled "
+    "at the uniform price with penalties and compensation kept (the block-2 "
+    "world); u_no_exec = (r_seller - K_lower) q for sellers, (K_upper - "
+    "r_buyer) q for buyers, adjustments kept, no penalty, no compensation, "
+    "actual = q (the block-1 world). A violation (u < -1e-9) is exec_only "
+    "when only u_no_adj violates, adj_only when only u_no_exec does, "
+    "both_alone when both do, and interaction when neither does: only the "
+    "combination violates. rescued counts u >= -1e-9 with u_no_adj < -1e-9, "
+    "the bonus preventing a violation the penalty alone would cause. The "
+    "cause column of ir_combined_ir asks a different question (which single "
+    "removal restores u) and counts an interaction under both levy and "
+    "shortfall.",
 )
 
 #: The per-cell comparison of the full engine and its baseline, shared by the
@@ -487,6 +504,60 @@ COLUMNS = {
         ("delta_star_base", "maximiser delta* / claim, baseline"),
     ),
 }
+
+#: The combined IR cells (D-91). Six tables mirror existing ones over the
+#: group's runs only and share their column tuples; two are new.
+for _table, _mirrors in (("ir_combined_census", "census"),
+                         ("ir_combined_ir", "dr3_ir"),
+                         ("ir_combined_settlement", "dr3_settlement"),
+                         ("ir_combined_eq48", "dr3_eq48"),
+                         ("ir_combined_budget", "dr4_layers"),
+                         ("ir_combined_coverage", "dr4_coverage")):
+    COLUMNS[_table] = COLUMNS[_mirrors]
+
+COLUMNS["ir_combined_decomposition"] = (
+    ("cell", "combined IR cell, all seeds"),
+    ("group", "seller_green, seller_grey (energy_type grey), buyer, or all"),
+    ("n", "area rows (participant-slots)"),
+    ("n_levy", "seller rows settled below the price: r_seller - p < -1e-6 "
+               "ct/kWh, beyond the six-decimal rounding of the rates"),
+    ("n_bonus", "seller rows settled above it: r_seller - p > 1e-6"),
+    ("n_penalised", "rows with shortfall + externality penalty > 1e-9 ct"),
+    ("n_adj_and_penalty", "rows with a levy or a bonus and a penalty: where "
+                          "the combination is exercised at all"),
+    ("n_violations", "rows with u < -1e-9"),
+    ("n_exec_only", "violations where only u_no_adj < -1e-9: the penalty "
+                    "layer alone would violate"),
+    ("n_adj_only", "violations where only u_no_exec < -1e-9: the levy alone "
+                   "would violate"),
+    ("n_both_alone", "violations where both would"),
+    ("n_interaction", "violations where neither would: only the combination "
+                      "violates"),
+    ("n_rescued", "rows with u >= -1e-9 and u_no_adj < -1e-9: the bonus "
+                  "prevents a violation the penalty alone would cause"),
+    ("min_u_ct", "smallest u over the group's rows, ct"),
+    ("sum_negative_u_ct", "sum of u over the violations, ct"),
+    ("net_rate_min_ct", "minimum settlement rate over rows with q > 0, as in "
+                        "dr3_settlement; empty for all, which would mix "
+                        "sellers and buyers"),
+    ("net_rate_p10_ct", "10th percentile of the same"),
+    ("net_rate_median_ct", "median of the same"),
+    ("n_net_rate_below_k_lower", "seller rows with q > 0 and a settlement "
+                                 "rate below K_lower; empty for buyers, the "
+                                 "two seller groups together for all"),
+)
+COLUMNS["ir_combined_participants"] = (
+    ("cell", "combined IR cell, all seeds"),
+    ("type", "household or battery (area id prefix battery-)"),
+    ("n_participant_weeks", "areas x seeds with at least one row: U = sum "
+                            "of u over the week, both sides"),
+    ("n_with_violating_slot", "participant-weeks with at least one row u < "
+                              "-1e-9"),
+    ("n_negative_week", "participant-weeks with U < -1e-9"),
+    ("min_week_u_ct", "smallest U, ct"),
+    ("p10_week_u_ct", "10th percentile of U, ct"),
+    ("median_week_u_ct", "median of U, ct"),
+)
 
 
 def names(table: str) -> list:

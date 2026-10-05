@@ -31,27 +31,35 @@ also carries its own marker and line style, so the figures survive greyscale
 printing and colour-vision deficiency without relying on hue. No figure has a
 second y-axis: two measures of different scale are two panels.
 
-Which figure is which in Chapter 5 (restructured by DR, 24.09.):
+Which figure is which in Chapter 5 (v13 of 05.10.2026, four figures):
 
-    module  file                          chapter
-    1       fig1_preference_density       Figure 5.1
-    2       fig2_reciprocity              Figure 5.2
-    8       fig8_dr2_curves               Figure 5.3
-    6       fig6_deadband                 Figure 5.4
-    7       fig7_gamma                    Figure 5.5
-    3       fig3_multiplier_formulation   Figure 5.6
-    9       fig9_scalability              Figure 5.7
-    4       fig4_battery_participation    not used
-    5       fig5_deviation_axes           not used (see its docstring)
+    module  file                              chapter
+    1       fig1_preference_density_buyers    Figure 5.1
+    10      fig10_dr2_curves_two              Figure 5.2
+    3       fig3_multiplier_formulation       Figure 5.3
+    9       fig9_scalability                  Figure 5.4
+    2       fig2_reciprocity                  not used (Figure 5.2 until v9; Table 5.2)
+    6       fig6_deadband                     not used (Figure 5.4 until v9; Table 5.5)
+    7       fig7_gamma                        not used (Figure 5.5 until v9; Table 5.6)
+    8       fig8_dr2_curves                   not used (Figure 5.3 until v9; fig10 is
+                                              its two-panel successor)
+    4       fig4_battery_participation        not used
+    5       fig5_deviation_axes               not used (see its docstring)
+
+Figure 5.1 shows the buyer fill rates since v10 (the seller fill rates of the
+24.09. version are in the git history of this file at 561e839). fig1 and fig10
+were first drawn for v10/v11 by a script outside the repository; they are
+ported here unchanged except for the font, so that every figure of the chapter
+is built from this module.
 
 Usage
 -----
-    python figures.py                 # the seven figures of Chapter 5
-    python figures.py --all           # all nine, including the two unused
-    python figures.py 7 8 9           # only these
+    python figures.py                 # the four figures of Chapter 5
+    python figures.py --all           # all ten, including the six unused
+    python figures.py 1 10            # only these
     python figures.py --refresh       # rebuild the cached per-run summary
     python figures.py --list          # what each figure shows
-    python figures.py 8 --analysis ../out/analysis/20260924-0e65c00
+    python figures.py 10 --analysis ../out/analysis/20261001-3680010
 
 `--analysis`, `--ncurve` and `--gas` pin a source directory; without them the
 newest one under `out/` is used (by the manifest's `timestamp_utc` where there
@@ -442,7 +450,14 @@ def _plain(value, _position=None):
 # ----------------------------------------------------------------- figures
 
 def fig1(data):
-    """Preference density: what the allocation order changes, and where."""
+    """Named share: pair-priority energy and the buyer fill rates (Figure 5.1).
+
+    Panel (a) is the energy the priority step allocates to mutual pairs;
+    (b) and (c) the mean fill rate of matched and unmatched buyers under each
+    allocation order, on one scale. Buyers since Chapter 5 v10 (comment K19):
+    the seller fill rates are reported in Table 5.2. The fill rates are printed
+    as well, so they can be checked against that table.
+    """
     densities = ("0.20", "0.50", "0.80")
     prefs = [f"prefs_first_d0{d}" for d in ("20", "50", "80")]
     pro = [f"pro_rata_first_d0{d}" for d in ("20", "50", "80")]
@@ -456,16 +471,16 @@ def fig1(data):
         ax.errorbar(densities, means, yerr=sds, color=colour, marker=marker,
                     linestyle=line, markersize=5, linewidth=1.6, capsize=2,
                     label=label)
-    ax.set_xlabel("named share"); ax.set_ylabel("cleared pair energy [kWh/week]")
-    ax.set_title("(a) Energy allocated\nto preferred pairs")
+    ax.set_xlabel("named share"); ax.set_ylabel("pair-priority energy [kWh/week]")
+    ax.set_title("(a) Energy via\npair priority")
     ax.legend(loc="upper left", fontsize=8, handlelength=1.6)
 
     for axis, cells, title in ((axes[1], prefs, "(b) preferences first"),
                                (axes[2], pro, "(c) pro rata first")):
-        matched, matched_sd = points(data, cells, "fill_seller_matched")
-        other, other_sd = points(data, cells, "fill_seller_unmatched")
+        matched, matched_sd = points(data, cells, "fill_buyer_matched")
+        other, other_sd = points(data, cells, "fill_buyer_unmatched")
         _bars(axis, densities, ("matched", "unmatched"),
-              [matched, other], [matched_sd, other_sd], "mean seller fill rate")
+              [matched, other], [matched_sd, other_sd], "mean buyer fill rate")
         axis.set_xlabel("named share")
         axis.set_title(title)
         # Fill rates are bounded by 1, so the headroom is free and the legend
@@ -473,7 +488,11 @@ def fig1(data):
         axis.set_ylim(0, 1.18)
     axes[1].legend(loc="upper center", ncol=2, fontsize=8, handlelength=1.2,
                    columnspacing=0.8)
-    save(fig, "fig1_preference_density")
+    for order, cells in (("preferences first", prefs), ("pro rata first", pro)):
+        for key in ("fill_buyer_matched", "fill_buyer_unmatched"):
+            print(f"    {order}, {key}: "
+                  f"{[round(m, 3) for m in points(data, cells, key)[0]]}")
+    save(fig, "fig1_preference_density_buyers")
 
 
 def fig2(data):
@@ -740,6 +759,10 @@ def fig8(_data):
     sellers left (cases 1-4) and buyers right (cases 5-8), so each row pairs
     the same side role and direction. The 2 x 4 version of 24.09. was 24 cm
     wide and printed at about 5 pt once Word scaled it to the text width.
+
+    Not used in Chapter 5 since v10 (Figure 5.3 until v9): Table 5.3 reports
+    all eight cases and Figure 5.2 (`fig10`) the four informative ones. Built
+    only with `--all` or `8`.
     """
     curves_path = source("analysis", "analysis/*", "dr2_curves.csv",
                          accept=_checks_passed)
@@ -803,6 +826,71 @@ def fig8(_data):
     save(fig, "fig8_dr2_curves", rect=(0.03, 0.0, 1.0, 0.975))
 
 
+def fig10(_data):
+    """DR2: median net gain over the deviation, four cases in two panels (Figure 5.2).
+
+    The successor of `fig8` since Chapter 5 v11: only the four cases of
+    Table 5.3 whose curve carries information, medians only, from the same
+    `dr2_curves.csv` / `dr2_cases.csv`. (a) Short-side sellers, rows 1 and 2:
+    withholding against over-reporting, with the deadband edge and the point
+    from which over-reporting stops paying, both as the medians
+    `dr2_cases.csv` reports. (b) Over-reporting on the long side, rows 4 and
+    8, still rising where the tested domain ends -- a lower bound, which the
+    panel says rather than leaves to the caption. Panel numbers in the legend
+    are the row numbers of Table 5.3.
+    """
+    curves_path = source("analysis", "analysis/*", "dr2_curves.csv",
+                         accept=_checks_passed)
+    curves = {}
+    for row in read_rows(curves_path):
+        curves.setdefault(row["case"], []).append(row)
+    cases = {row["case"]: row for row in read_rows(curves_path.parent / "dr2_cases.csv")
+             if row["type"] == "all"}
+
+    def curve(case):
+        rows = sorted(curves[case], key=lambda r: float(r["delta_rel"]))
+        return ([float(r["delta_rel"]) for r in rows],
+                [100 * float(r["net_rel_median"]) for r in rows])
+
+    fig, (a, b) = plt.subplots(1, 2, figsize=(TEXT_WIDTH_IN, 2.75))
+    for axis in (a, b):
+        axis.axhline(0.0, color=INK, linewidth=0.7, zorder=1)
+        axis.set_xlim(0.0, 0.5)
+        axis.set_xticks([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
+        axis.set_xticklabels(["0", "0.1", "0.2", "0.3", "0.4", "0.5"])
+        axis.set_xlabel("deviation [share of claim]")
+
+    a.plot(*curve("seller_short_overreport"), color=C1, linestyle="-",
+           linewidth=1.8, label="(2) over-reporting")
+    a.plot(*curve("seller_short_withhold"), color=C2, linestyle="--",
+           linewidth=1.6, label="(1) withholding")
+    over = cases["seller_short_overreport"]
+    edge = float(over["delta_active_rel_median"])
+    zero = float(over["delta_zero_rel_median"])
+    for x, text, ha, dx, y in ((edge, f"deadband\nedge {edge:.3f}", "right", -0.01, 31),
+                               (zero, f"no gain\nfrom {zero:.3f}", "left", 0.01, -44)):
+        a.axvline(x, color=MUTED, linestyle=":", linewidth=1.0, zorder=1)
+        a.text(x + dx, y, text, fontsize=7.5, color=MUTED, ha=ha, va="top")
+    a.set_ylim(-62, 33)
+    a.set_yticks(range(-60, 31, 20))
+    a.set_ylabel("median net gain\n[% of truthful payoff]")
+    a.set_title("(a) Sellers on the short side")
+    a.legend(loc="upper right", fontsize=8, handlelength=1.8)
+
+    b.plot(*curve("seller_long_overreport"), color=C1, linestyle="-",
+           linewidth=1.8, label="(4) sellers")
+    b.plot(*curve("buyer_long_overreport"), color=C3, linestyle="-.",
+           linewidth=1.6, label="(8) buyers")
+    b.set_ylim(-5, 55)
+    b.set_yticks(range(0, 51, 10))
+    b.set_title("(b) Over-reporting on the long side")
+    b.text(0.49, 3, "still rising at 0.5", fontsize=7.5, color=MUTED,
+           ha="right", va="bottom")
+    b.legend(loc="upper left", fontsize=8, handlelength=1.8)
+    print(f"    deadband edge {edge:.3f}, no gain from {zero:.3f}")
+    save(fig, "fig10_dr2_curves_two")
+
+
 def fig9(_data):
     """DR7: on-chain gas and off-chain cycle over N, in two panels.
 
@@ -810,7 +898,8 @@ def fig9(_data):
     y-axes on one. (a) The `n_axis` rows of the scripted gas series: one
     clearMarket per N, at the aggregates of N participants. (b) The N-curve:
     the in-process clearing cycle per slot over the number of orders, every
-    repeat as an open marker and the median as the line (Table 5.10).
+    repeat as an open marker and the median as the line (Table 5.11 of
+    Chapter 5 v13; Figure 5.4 there, Figure 5.7 until v9).
     """
     gas_path = source("gas", "gas-*", "gas_series.csv")
     ncurve_path = source("ncurve", "ncurve-*", "ncurve.csv")
@@ -892,27 +981,28 @@ def fig9(_data):
 
 #: number -> (function, needs the per-run summary, place in Chapter 5, what it shows)
 FIGURES = {
-    1: (fig1, True, "Figure 5.1", "preference density: pair energy and the fill-rate asymmetry"),
-    2: (fig2, True, "Figure 5.2", "reciprocity: cleared pair energy and pair count over the mutual share"),
-    3: (fig3, True, "Figure 5.6", "multiplier formulations on the reference window and the overlap variant"),
+    1: (fig1, True, "Figure 5.1", "named share: pair-priority energy and the buyer fill rates"),
+    2: (fig2, True, "not used", "reciprocity: cleared pair energy and pair count over the mutual share"),
+    3: (fig3, True, "Figure 5.3", "multiplier formulations on the reference window and the overlap variant"),
     4: (fig4, True, "not used", "battery participation: grey share and the round types it leaves"),
     5: (fig5, True, "not used", "block 2: deviator penalty over the share and coalition axes"),
-    6: (fig6, True, "Figure 5.4", "the deadband: deviation extinguished, honest shortfall absorbed"),
-    7: (fig7, True, "Figure 5.5", "gamma: the shortfall channel, the deviator and the honest side"),
-    8: (fig8, False, "Figure 5.3", "DR2: net gain over the deviation, the eight cases of Table 5.3"),
-    9: (fig9, False, "Figure 5.7", "DR7: gas per window and off-chain cycle over N, two panels"),
+    6: (fig6, True, "not used", "the deadband: deviation extinguished, honest shortfall absorbed"),
+    7: (fig7, True, "not used", "gamma: the shortfall channel, the deviator and the honest side"),
+    8: (fig8, False, "not used", "DR2: net gain over the deviation, the eight cases of Table 5.3"),
+    9: (fig9, False, "Figure 5.4", "DR7: gas per window and off-chain cycle over N, two panels"),
+    10: (fig10, False, "Figure 5.2", "DR2: median net gain, the four informative cases in two panels"),
 }
 
 #: What a bare `python figures.py` builds: the figures of Chapter 5, in its order.
-CHAPTER = (1, 2, 8, 6, 7, 3, 9)
+CHAPTER = (1, 10, 3, 9)
 
 
 def main(argv):
     parser = argparse.ArgumentParser(description="Chapter 5 figures.")
     parser.add_argument("numbers", nargs="*", type=int,
-                        help="figure numbers (default: the seven of Chapter 5)")
+                        help="figure numbers (default: the four of Chapter 5)")
     parser.add_argument("--all", action="store_true",
-                        help="all figures, including the two Chapter 5 does not use")
+                        help="all figures, including the six Chapter 5 does not use")
     parser.add_argument("--list", action="store_true", help="what each figure shows")
     parser.add_argument("--refresh", action="store_true",
                         help="rebuild the cached per-run summary from scratch")
@@ -923,7 +1013,7 @@ def main(argv):
 
     if args.list:
         for number, (_, _, chapter, description) in FIGURES.items():
-            print(f"  {number}  {chapter:<11} {description}")
+            print(f"  {number:>2}  {chapter:<11} {description}")
         return
     for kind in ("analysis", "ncurve", "gas"):
         if getattr(args, kind):

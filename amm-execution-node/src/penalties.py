@@ -67,8 +67,8 @@ def seller_externality_penalty(energy_traded: float, actual_deliverable: float,
         sigmoid["theta"], sigmoid["steepness"])
     # Charged on the round's traded quantity Q_t, not on the seller's own
     # volume: Saber et al. (2026), Applied Energy 416, 127957, §2.4.1
-    # Eq. (28), as printed — Eq. (4.4) in this thesis. The buyer side is
-    # Eq. (29), Eq. (4.5) here.
+    # Eq. (28), as printed — Eq. 17 in the thesis. The buyer side is
+    # Eq. (29), Eq. 18 in the thesis.
     penalty = max(0.0, (clearing_price - p_counterfactual) * traded_quantity_kwh)
     return {
         "withheld_kwh": round(withheld, 6),
@@ -87,7 +87,7 @@ def buyer_externality_penalty(reported_demand: float, actual_demand: float,
     Counterfactual: had the true demand been reported, demand would have been
     higher and the clearing price higher for all sellers. (No η tolerance for
     buyers in the spec.) Charged on the round's traded quantity Q_t like the
-    seller side: Saber et al. (2026), §2.4.1 Eq. (29) — Eq. (4.5) in this
+    seller side: Saber et al. (2026), §2.4.1 Eq. (29) — Eq. 18 in the
     thesis.
     """
     underreported = max(0.0, actual_demand - reported_demand)
@@ -119,7 +119,8 @@ def redistribution(rows: list[dict], clearing_price: float,
     simultaneous deviators change is the *coverage*: whether the pool
     matches the damage measured against a joint counterfactual that puts all
     their quantities back at once, since the per-deviator counterfactuals
-    are not additive. The node does not compute coverage (Chapter 4.3.6).
+    are not additive. The node does not compute coverage (thesis, Section
+    4.2.6).
     `budget_balance_ct` is non-zero in exactly one case: `total_damage <= ε`,
     where the pool is reported undistributed.
 

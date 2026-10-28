@@ -1,163 +1,188 @@
 # Evaluation harness
 
-**`evaluation/` is not part of the artifact.** It is the simulation harness for
-the thesis evaluation: it drives the three services in process, records what
-they answer, and writes figures. Nothing here is deployed, and nothing in the
-three services depends on it — the boundary is the same one `ui/` sits outside
-of (D-13).
+**`evaluation/` is not part of the artifact.** It holds the simulation harness and
+the analysis behind Chapter 5 of the thesis. It loads the three services' `src`
+packages into one process, drives them through simulated market weeks, records
+their responses and builds the tables and figures. The services do not depend on
+anything here, and nothing here is deployed.
 
 ## Setup
 
+From the repository root:
+
 ```bash
-pip install -r evaluation/requirements.txt
+pip install -r amm-execution-node/requirements.txt -r evaluation/requirements.txt
 ```
 
-The harness loads the three services' `src` packages side by side out of the
-working tree, so their own dependencies (`fastapi`, `httpx`, `pydantic`,
-`pyyaml`) must be installed as well. No ports, no docker, no database.
+The first file installs the services' own dependencies (`fastapi`, `httpx`,
+`pydantic`, `pyyaml`), the second the harness's (`openpyxl`, `matplotlib`, `numpy`,
+`pytest`). No ports, no Docker and no blockchain are needed. The Clearing Node runs
+in mock mode.
+
+The input data is the energy-community dataset of Faia et al. (2023) in
+`data/raw/`. Its source, licence (CC BY 4.0) and SHA-256 are in
+[`data/PROVENANCE.md`](data/PROVENANCE.md). Every script treats `data/raw/` as
+read-only.
 
 ## Smoke test
 
-One slot through the real pipeline — run it after moving the harness, after
-changing a service, and before starting a campaign:
+One slot through the real pipeline. Run it after changing a service and before a
+campaign:
 
 ```bash
 cd evaluation/harness
 python smoke.py
 ```
 
-It proves the three services load side by side, a clearing round completes,
-and the execution node answers with a redistribution block. The expected
-output is fixed and is the regression check for the runner:
+Expected output. The first four lines use the illustrative parameters of the
+reference example (`K_upper` = 28.5, `B` = 2.5), the fifth the configured band:
 
 ```
 clearing price : 15.147274 ct/kWh
 trades         : 100
 round type     : DEMAND_LIMITED
 redistribution : present
+configured band: 8.0 .. 40.0 ct/kWh -> 22.802265 ct/kWh
 
 SMOKE TEST PASSED
 ```
-
-If that price moves, something changed that should not have.
 
 ## Tests
 
 ```bash
 cd evaluation
-python -m pytest -q
+python -m pytest -q          # 175 passed, 1 skipped at 63043bb
 ```
 
-`conftest.py` puts `harness/` (and `calibration/`, once it exists) on
-`sys.path`, so the flat imports the scripts use work under pytest as well.
-`tests/test_harness.py` holds the four tests that each stand for a defect that
-actually reached a figure; do not weaken them.
+The skipped test needs the manifest of a calibration week, which lives in the
+git-ignored `out/`. `tests/test_harness.py` holds seven tests, each standing for a
+defect that once reached a figure.
 
-## Running a campaign
+## The campaign
 
 ```bash
 cd evaluation/harness
-python campaign.py            # the profile campaign: 4 cells x 5 seeds
-python pilot.py               # the 02.09. synthetic blocks, which plots.py reads
+python campaign.py --block 1          # one group; see the table
+python campaign.py --block ir --resume
+python campaign.py                    # every group, including the calibration weeks
 ```
 
-The pilot lives in its own module because it has its own manifest
-convention: it appends to `out/manifest.json`, while a campaign run writes one
-manifest per run directory through `runs.write_manifest`. `pilot.py` imports
-what the two share from `campaign`; `campaign` does not import `pilot`.
+| Group | Flag | Cells × seeds | Content | Ran at (thesis, Appendix C.3) |
+|---|---|---|---|---|
+| Preference block | `--block 1` | 19 × 5 | allocation orders, partner density and the origin adjustment; not executed (no penalties) | `f83b57a` |
+| Penalty block | `--block 2` | 14 × 5 | forecast noise, deliberate deviations and coalitions; executed | `3422529` |
+| γ/η sweep | `--block sweep` | 12 × 5 | the penalty block's reference with one of γ and η moved | `3422529`, `91790e9` |
+| Combined IR cells | `--block ir` | 6 × 5 | preference-block configurations executed under the penalty block's noise | `3680010` |
+| Calibration weeks | `--calibration` | 6 × 1 | the five fitting weeks (extension seeds 20260917–20260921) and the out-of-sample week 4242 | — |
 
-A campaign runs one process per run (`multiprocessing`, **spawn**), each worker
-building its own `Stack` and therefore its own empty store. That is what makes
-the process boundary a substitute for reset choreography and slot offsets:
-there is no shared order book for two runs to collide in. Five seeds per cell,
-recorded individually (D-59). `runs.RunSpec` carries everything a run depends
-on; `runs.execute_run` builds the stack, walks the week, writes the CSVs,
-writes the manifest and runs the pre-flight checks — including
-`check_ratio_spread`, which sits on the campaign path rather than merely being
-importable.
+The four groups are 51 cells and 255 runs. Without a flag the campaign runs all of
+them plus the six calibration weeks.
 
-**Preferences and sigmoid parameters go through the trigger**
-(`trigger["preference_params"]`, `trigger["sigmoid_params"]`), which
-`run_clearing` resolves. `Stack.clear(preferences=…)` is not used in campaign
-runs: two ways of setting the same thing is how a manifest stops describing the
-run it names.
+One process per run (`multiprocessing`, spawn), each with its own in-memory store.
+A run is one simulated week of 672 slots of a community of 100 households.
+`--resume` skips runs whose manifest exists. `--out DIR` writes elsewhere than
+`out/`. Preferences and pricing parameters reach the Clearing Node through the
+trigger (`preference_params`, `sigmoid_params`), as recorded in each manifest.
 
-### The combined IR cells
+The services' executable code is the same in all commits of the table and at
+`63043bb`; the commits differ in the evaluation code and in comments.
+
+## Calibration of the pricing function
+
+```bash
+cd evaluation/calibration
+python fit.py ../out/<run-id>/<run-id>_slots.csv --run-id <name>
+```
+
+A bounded coarse-to-fine grid search for `Θ` and `B` over the loss of Appendix C.2
+(α = 0.5, band 8–40 ct/kWh by default). The thesis uses the medians over the five
+fitting weeks, rounded to `Θ` = 1.0 and `B` = 0.6.
+
+## Analysis
+
+```bash
+cd evaluation/analysis
+python dr_analysis.py                 # all DR2–DR5 tables
+python dr5_cost.py                    # the cost of priority (Section 5.2.2)
+```
+
+`dr_analysis.py` reads the runs under `out/` (or `--runs DIR …`) and writes into a
+fresh `out/analysis/<date>-<sha>/` (or `--dest DIR`). It never writes into a run
+directory. Before any table it checks that it reproduces what the artifact
+recorded (R1–R3: prices, allocations and penalties) and exits with 1 naming the
+failure otherwise. `--compare-to DIR` compares the new tables byte for byte with
+an earlier analysis. `dr5_cost.py` reads the preference block's runs and writes one
+JSON and one CSV.
+
+## Scalability
+
+```bash
+cd amm-smart-contract
+npx hardhat compile                    # first, so that no compiler message lands in the CSV
+mkdir -p ../evaluation/out/gas-<date>
+npx hardhat run scripts/gas_series.js > ../evaluation/out/gas-<date>/gas_series.csv
+
+cd ../evaluation/harness
+python ncurve.py --out ../out/ncurve-<date>          # N = 5 … 100,000 orders per slot
+```
+
+The gas series runs on the in-process Hardhat network: 20 clearings at recorded
+slot aggregates and six at the aggregates of 6 to 3,200 participants. Each
+`clearMarket` costs 216,843 gas, minus 12 gas per zero byte of calldata, and the
+cost does not grow with the number of participants. `ncurve.py` times the
+off-chain clearing cycle in process and reports points only (no fit, no capacity).
+
+## Figures
 
 ```bash
 cd evaluation/harness
-python campaign.py --block ir          # 6 cells x 5 seeds; --resume after an abort
+python figures.py            # the figures of Chapter 5 and Appendix C
+python figures.py --list     # what each figure shows
 ```
 
-`campaign.ir_grid()` (D-91) takes block-1 cells with preferences and the
-energy-origin adjustment (`multipliers_on`, `mult_overlap_*`) and executes them
-under block 2's accidental layer, so a levy or a bonus and a penalty can fall on
-the same participant-slot; one cell moves the levy to its cap, two move eta or
-gamma to the sweep points where honest sellers violate IR without preferences.
-`analysis/dr_analysis.py` evaluates the group in its own stage
-(`analysis/ir_combined.py`, tables `ir_combined_*`) and keeps it out of every
-other table. Its hard checks need the block-1 source runs in the same run set
-(the group clears exactly their markets) and runs recorded at a commit whose
-`campaign.py` defines `ir_grid` — run the group from a clean, committed tree.
+The figures are read from the newest matching directory under `out/`. `--analysis`,
+`--ncurve` and `--gas` pin a directory. Module numbers and figures in the thesis:
 
-### N-curve
+| `figures.py` | Thesis |
+|---|---|
+| 1 | Figure 3, partner priority on the buying side |
+| 10 | Figure 4, median net gain over the deviation size |
+| 9 | Figure 5, gas and off-chain runtime |
+| 3 | Figure C1, the two origin formulations |
 
-```bash
-cd evaluation/harness
-python ncurve.py                                    # the default points, 5 .. 100 000
-python ncurve.py --points 5,10,20,50,100 --repeats 1
-```
-
-`ncurve.py` measures the off-chain clearing cycle against the number of orders
-in a slot (one order per area, so N orders is N market areas) and writes one
-row per slot to `out/ncurve/ncurve.csv`; it refuses to start into a directory
-that already holds a `manifest.json` rather than appending to it. Each row
-carries three times: `t_setup_s` is `POST /market` plus
-`POST /orders-normalized` and is **excluded** from the cycle figure,
-`t_clear_s` is `st.clear(trigger)` end to end and **is** the cycle, and
-`t_store_in_clear_s` is how much of that cycle was spent in off-chain store
-calls — accumulated by `stack.TimedTransport`, which both DB clients and the
-clearing node's own queries share, so the split says which component a point's
-time is actually in. If `t_clear_s` ever exceeds the 900 s slot the point is
-recorded, the curve stops and no larger N is run; the script still exits 0,
-because a stopping rule that fails the run loses the points already measured.
-The curve is measured **in process** — no network, no uvicorn, no real chain —
-and is therefore reported as a complexity statement (the off-chain cycle grows
-with N, `clearMarket` does not) and never as a capacity: nothing here fits a
-line, extrapolates a saturation point or converts a time into a participant
-count.
+Figure 2 of the thesis, the pricing function, is computed with the Clearing Node's
+`sigmoid_price` and is not produced by `figures.py`. The other six modules
+(`--all`) draw figures that the thesis does not use.
 
 ## Where output lands
 
-Everything goes to `evaluation/out/`, one subdirectory per run, and `out/` is
-git-ignored: results are not part of the artifact either.
+Everything goes to `evaluation/out/`, which is git-ignored:
 
 ```
-out/<run_id>/<run_id>_slots.csv    one row per slot
-out/<run_id>/manifest.json         one provenance entry per run
-out/figures/                       figures from plots.py
-out/ncurve/                        the N-curve: one CSV row per slot,
-                                   one manifest per invocation
+out/<cell>--seed-<n>/manifest.json     configuration, seeds, commit, input digest
+out/<cell>--seed-<n>/*_slots.csv       one row per slot
+out/<cell>--seed-<n>/*_areas.csv       one row per participant and slot
+out/analysis/<date>-<sha>/             tables of dr_analysis.py and dr5_cost.py
+out/gas-*/, out/ncurve-*/              scalability measurements
+out/figures/                           figures.py
 ```
 
-**Everything the thesis cites comes out of `out/` and is identified by the
-manifest, not by a file path.** Each manifest entry carries `config + seed +
-SHA`, the dataset extension seed, the selected player ids and the five seeds of
-its cell individually, so a single deviating cell can be re-run alone.
+A figure in the thesis is traced through the manifest of the run behind it
+(configuration, seeds, commit), not through a file path. The run data of the thesis
+are not in the repository and can be regenerated with the commands above.
 
-## Data
+## Legacy scripts
 
-`data/raw/` holds the Faia et al. energy-community workbook and is **read-only
-for every script here** — a run that writes into `raw/` is a bug.
-`data/PROVENANCE.md` carries the source, DOI, licence, SHA-256 and the
-properties measured off the file; `data/derived/` is git-ignored and is
-regenerated from `raw/` plus the extension seed recorded in the manifest.
+`harness/legacy/` (`eval_r0_r1.py`, `eval_r2.py`, `eval_r3_r4.py`, `eval_r5.py`,
+`blockd.py`, `blockd2.py`, `blocke.py`) is frozen at the test run of 02.09.2026 and
+runs against `git checkout fe52d63`, not against the current runner.
+`harness/pilot.py` and `plots.py` belong to the same test run. No result of the
+thesis depends on any of them; they are kept as a record.
 
-## Frozen scripts: `harness/legacy/`
+## A note on references in the code
 
-`eval_r0_r1.py`, `eval_r2.py`, `eval_r3_r4.py`, `eval_r5.py`, `blockd.py`,
-`blockd2.py` and `blocke.py` are frozen at the 02.09.2026 test run and run
-against `git checkout fe52d63`, not against the current runner signature — it
-now requires an explicit community and slot, and these scripts call `run_slot`
-positionally. They produced the 02.09. test-run figures; no Chapter 5 result
-depends on them, so they are kept as a record rather than adapted.
+Comments in `evaluation/` cite tables, figures and sections of thesis drafts from
+September and October 2026 (for example *Table 4.2*, *Figure 5.1*). The submitted
+thesis numbers them differently: Table 4.2 of the drafts is Table 5, Table 4.3 is
+Table 6, and the figures are mapped above. `D-xx` and `#xx` refer to the thesis'
+own decision log and issue list (see the root README).

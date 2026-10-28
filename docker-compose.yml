@@ -20,8 +20,9 @@ services:
     build: ./amm-clearing-node
     environment:
       - OFFCHAIN_DB_URL=http://mock-offchain-db:8080
-      # mock = simulated on-chain anchor (default). Set live + the vars below
-      # to anchor on a real chain (see README "Live blockchain mode").
+      # mock = simulated on-chain anchor (default). Live mode needs web3,
+      # which this image does not install: run the Clearing Node from a local
+      # Python environment instead (see README "Live blockchain mode").
       - BLOCKCHAIN_MODE=${BLOCKCHAIN_MODE:-mock}
       - RPC_URL=${RPC_URL:-}
       - CONTRACT_ADDRESS=${CONTRACT_ADDRESS:-}

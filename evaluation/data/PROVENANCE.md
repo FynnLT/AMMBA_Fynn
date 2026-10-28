@@ -62,10 +62,14 @@ numbers: period 33 = 08:15, period 36 = 09:00, period 76 = 19:00. The
 ## Units — the sheets are not consistent, and one label is wrong
 
 **`Load` and `PV` are powers in kW.** Energy per period is `value × 0.25 h`.
-Grounds: the sheet headers use kW throughout, the resulting mean household load
-is 1.02 kW, and reading the values as kWh would put a household at 98 kWh/day.
-To be confirmed against the *Data in Brief* article before Chapter 5 states a
-unit.
+The data article gives both sheets in kW (Faia et al., 2023, Sections 2 and
+3.1, checked 28.10.2026), and the data agree: read as kW, no household's load
+ever exceeds its initial contracted power (`Limits`, 3.45, 6.9 or 10.35 kW),
+whereas read as kWh per period 234 of the 250 households would. The label alone
+would not settle it, because the same article also writes kW for storage and
+vehicle capacities, which are energies (see `BESS` below). Read as kW, the mean
+household load is 1.02 kW, or 24.5 kWh per day; read as kWh, it would be 98 kWh
+per day.
 
 **`BESS` mixes the two, and its `(kW)` labels are partly wrong.** The sheet
 labels every row `(kW)`, but three of them are energies:
